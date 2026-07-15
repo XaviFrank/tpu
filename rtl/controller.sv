@@ -1,26 +1,44 @@
 `timescale 1ns / 1ps
 //====================================================================
-// controller v3: tile-lifecycle FSM for matmul_unit
-//   go (with tile indices) -> FETCH tiles from BRAM buffers into
-//   staging regs -> FEED (K beats) -> SETTLE (2N) -> DRAIN (N)
-//   Option A: fetch-then-feed; everything from FEED onward is
-//   identical to v2. Strictly sequential: no fetch/feed/drain
-//   overlap (overlap engine is a ROADMAP item).
+// controller v4: tile-lifecycle FSM for matmul_unit, with K-walk
+//   go (with k_chunks + first tile indices) ->
+//     repeat k_chunks times: FETCH tiles from BRAM into staging,
+//     FEED them (accumulating in the PEs) ->
+//   one SETTLE -> one DRAIN -> IDLE
+//
+//   Chunk handshake: chunk_req is high for exactly ONE cycle per
+//   chunk; a_tile_idx/b_tile_idx are registered at the posedge that
+//   ENDS the chunk_req cycle, and that chunk's FETCH begins on the
+//   following cycle. The windows are:
+//     chunk 0   : the accepted-go cycle (state==S_IDLE && go)
+//     chunk c>0 : the LAST FEED cycle of chunk c-1
+//   The issuer presents indices combinationally while chunk_req is
+//   high. k_chunks (>= 1; 0 is illegal) is latched once, at the
+//   accepted go.
+//
+//   Strictly sequential: no fetch/feed/drain overlap (overlap engine
+//   is a ROADMAP item). k_chunks=1 reproduces v3 exactly.
 //====================================================================
 module controller #(
     parameter int N          = 4,
     parameter int K          = 4,
     parameter int DATA_WIDTH = 8,
-    parameter int DEPTH      = 64   // tile-buffer beat-words; DEPTH/K tiles
+    parameter int DEPTH      = 64,  // tile-buffer beat-words; DEPTH/K tiles
+    parameter int CHUNK_W    = 4    // width of k_chunks / chunk counter
 )(
     input  logic clk,
     input  logic rst_n,
 
-    // command interface (indices latched on the accepted go)
+    // command interface
     input  logic                          go,
+    input  logic [CHUNK_W-1:0]            k_chunks,   // latched with go
+    output logic                          busy,
+
+    // chunk handshake (indices sampled while chunk_req is high;
+    // also sampled at the accepted go, for chunk 0)
+    output logic                          chunk_req,
     input  logic [$clog2(DEPTH/K)-1:0]    a_tile_idx,
     input  logic [$clog2(DEPTH/K)-1:0]    b_tile_idx,
-    output logic                          busy,
 
     // tile-buffer read ports (one beat = 4 packed int8s; rd_data
     // valid 1 cycle after rd_en - see tile_buffer)
@@ -58,7 +76,7 @@ module controller #(
     state_t state, state_next;
 
     //----------------------------------------------------------------
-    // Counters, latched indices, staging registers
+    // Counters, latched command, staging registers
     //----------------------------------------------------------------
     localparam int SETTLE_CYCLES = 2*N; // boundary certified, 2N-1 clips the boundary
 
@@ -75,13 +93,29 @@ module controller #(
     logic                             land_valid;
     logic [$clog2(K)-1:0]             land_cnt;
 
+    // K-walk bookkeeping: which chunk is in flight, out of how many
+    logic [CHUNK_W-1:0]               chunk_cnt;
+    logic [CHUNK_W-1:0]               k_chunks_q;
+    logic                             last_chunk;
+
     logic [$clog2(DEPTH/K)-1:0]       a_idx_q, b_idx_q;
 
     logic signed [DATA_WIDTH-1:0] a_tile [N][K];
     logic signed [DATA_WIDTH-1:0] b_tile [K][N];
 
+    assign last_chunk = (chunk_cnt == k_chunks_q - 1'b1);
+
     //----------------------------------------------------------------
-    // Process 1 (clocked): state register, counters, index latching
+    // Chunk handshake: one-cycle index-sampling window per chunk.
+    // Window for chunk 0 is the accepted-go cycle; window for chunk
+    // c>0 is the last FEED cycle of chunk c-1 (the same cycle the
+    // FEED->FETCH loop-back is decided).
+    //----------------------------------------------------------------
+    assign chunk_req = (state == S_IDLE && go)
+                    || (state == S_FEED && beat_cnt == K-1 && !last_chunk);
+
+    //----------------------------------------------------------------
+    // Process 1 (clocked): state register, counters, command latching
     //----------------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -92,6 +126,7 @@ module controller #(
             fetch_cnt  <= '0;
             land_valid <= 1'b0;
             land_cnt   <= '0;
+            chunk_cnt  <= '0;
         end else begin
             state <= state_next;
 
@@ -109,14 +144,26 @@ module controller #(
             if (state_next == S_DRAIN)
                 drain_cnt <= (state == S_DRAIN) ? drain_cnt + 1'b1 : '0;
 
+            // chunk counter: 0 at walk start, +1 on each FEED->FETCH
+            // loop-back (i.e. each completed non-final chunk)
+            if (state == S_IDLE && go)
+                chunk_cnt <= '0;
+            else if (state == S_FEED && state_next == S_FETCH)
+                chunk_cnt <= chunk_cnt + 1'b1;
+
             // landing pipe: issue side asserts rd_en with fetch_cnt=c;
             // that word is on rd_data one cycle later, so delay the
             // count/valid by one cycle to know where it lands
             land_valid <= rd_en_a;
             land_cnt   <= fetch_cnt[$clog2(K)-1:0];
 
-            // index capture: exactly once, on the accepted go
-            if (state == S_IDLE && go) begin
+            // walk-length capture: exactly once, on the accepted go
+            if (state == S_IDLE && go)
+                k_chunks_q <= k_chunks;
+
+            // index capture: once per chunk, in the chunk_req window
+            // (covers the accepted go, since chunk_req is high there)
+            if (chunk_req) begin
                 a_idx_q <= a_tile_idx;
                 b_idx_q <= b_tile_idx;
             end
@@ -156,8 +203,18 @@ module controller #(
             S_FETCH:  if (fetch_cnt == K)
                           state_next = S_FEED;
 
-            S_FEED:   if (beat_cnt == K-1)
-                          state_next = S_SETTLE;
+            // K-walk loop-back: more chunks -> straight back to FETCH.
+            // THE ACCUMULATORS INTENTIONALLY CARRY PARTIAL SUMS ACROSS
+            // CHUNKS: this path must never pass through any state or
+            // logic that asserts clear or drain (it doesn't - clear is
+            // S_INIT-only, drain is S_DRAIN-only). No SETTLE between
+            // chunks either: the FETCH gap in the valid stream is
+            // handled by valid gating (verified in tb_pe_os T2).
+            // SETTLE runs once, after the FINAL chunk's FEED.
+            S_FEED:   if (beat_cnt == K-1) begin
+                          if (last_chunk) state_next = S_SETTLE;
+                          else            state_next = S_FETCH;
+                      end
 
             S_SETTLE: if (settle_cnt == SETTLE_CYCLES-1)
                           state_next = S_DRAIN;

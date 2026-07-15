@@ -1,10 +1,14 @@
 `timescale 1ns / 1ps
 //====================================================================
-// matmul_unit v3: self-sequencing NxN output-stationary matmul with
-// BRAM-backed tile buffers.
-//   Load tiles through the raw write ports (TB in v1, DMA/AXI in
-//   Phase 3), then: go + tile indices -> controller fetches from the
-//   buffers, feeds/settles/drains autonomously.
+// matmul_unit v4: self-sequencing NxN output-stationary matmul with
+// BRAM-backed tile buffers and multi-chunk K-walk accumulation.
+//   Load tiles through the raw write ports (TB/tiling_engine now,
+//   DMA/AXI in Phase 3), then: go + k_chunks + first tile indices ->
+//   controller fetches/feeds k_chunks tile pairs, accumulating in
+//   the PEs, then settles and drains ONCE.
+//   Per-chunk indices are sampled while chunk_req is high (see
+//   controller v4 for the exact windows). k_chunks=1 is the plain
+//   single-tile matmul.
 //   Results exit on drain_out, labeled by result_row.
 //====================================================================
 module matmul_unit #(
@@ -12,12 +16,15 @@ module matmul_unit #(
     parameter int K          = 4,
     parameter int DATA_WIDTH = 8,
     parameter int ACC_WIDTH  = 32,
-    parameter int DEPTH      = 64   // tile-buffer beat-words; DEPTH/K tiles
+    parameter int DEPTH      = 64,  // tile-buffer beat-words; DEPTH/K tiles
+    parameter int CHUNK_W    = 4    // width of k_chunks
 )(
     input  logic                          clk,
     input  logic                          rst_n,
 
     input  logic                          go,
+    input  logic [CHUNK_W-1:0]            k_chunks,
+    output logic                          chunk_req,
     input  logic [$clog2(DEPTH/K)-1:0]    a_tile_idx,
     input  logic [$clog2(DEPTH/K)-1:0]    b_tile_idx,
 
@@ -92,11 +99,14 @@ module matmul_unit #(
     );
 
     controller #(
-        .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .DEPTH(DEPTH)
+        .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .DEPTH(DEPTH),
+        .CHUNK_W(CHUNK_W)
     ) u_ctrl (
         .clk          (clk),
         .rst_n        (rst_n),
         .go           (go),
+        .k_chunks     (k_chunks),
+        .chunk_req    (chunk_req),
         .a_tile_idx   (a_tile_idx),
         .b_tile_idx   (b_tile_idx),
         .busy         (busy),
