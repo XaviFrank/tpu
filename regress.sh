@@ -30,6 +30,9 @@ run_tb tb_systolic_array rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv tb/t
 run_tb tb_matmul_unit    rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
                          rtl/input_skew.sv rtl/tile_buffer.sv rtl/controller.sv \
                          rtl/matmul_unit.sv tb/tb_matmul_unit.sv
+run_tb tb_tiling_engine  rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
+                         rtl/input_skew.sv rtl/tile_buffer.sv rtl/controller.sv \
+                         rtl/matmul_unit.sv rtl/tiling_engine.sv tb/tb_tiling_engine.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
