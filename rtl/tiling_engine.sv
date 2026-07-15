@@ -25,6 +25,12 @@
 //   whole walk has to finish (and drain) before moving to another
 //   output tile.
 //
+//   Perf counters: pure observer on the controller's exported flags;
+//   read via perf_addr/perf_data (1-cycle latency, map in
+//   docs/perf_map.md). perf_clear zeroes them; with AUTO_CLEAR=1
+//   (default) an accepted start also clears, making the numbers
+//   per-run. Set AUTO_CLEAR=0 for cumulative counting.
+//
 //   Strictly sequential per output tile (issue go, service
 //   chunk_req and result_valid, wait for !busy, advance). FUTURE
 //   OPTIMIZATION: overlap the next tile's go with the previous
@@ -37,7 +43,8 @@ module tiling_engine #(
     parameter int ACC_WIDTH  = 32,
     parameter int CHUNK_W    = 4,
     parameter int AB_DEPTH   = 64,   // a/b buffer beat-words (16 tiles each)
-    parameter int OUT_DEPTH  = 64    // output buffer words (16 C-tiles at 4 words each)
+    parameter int OUT_DEPTH  = 64,   // output buffer words (16 C-tiles at 4 words each)
+    parameter int AUTO_CLEAR = 1     // 1: accepted start also clears perf counters
 )(
     input  logic clk,
     input  logic rst_n,
@@ -61,7 +68,12 @@ module tiling_engine #(
     // output buffer read port (host/TB side; 1-cycle read latency)
     input  logic                            out_rd_en,
     input  logic [$clog2(OUT_DEPTH)-1:0]    out_rd_addr,
-    output logic [N*ACC_WIDTH-1:0]          out_rd_data
+    output logic [N*ACC_WIDTH-1:0]          out_rd_data,
+
+    // perf counter access (host/TB side; 1-cycle read latency)
+    input  logic                            perf_clear,
+    input  logic [3:0]                      perf_addr,
+    output logic [31:0]                     perf_data
 );
 
     localparam int OUT_WORD_WIDTH = N * ACC_WIDTH;   // one drain row per word
@@ -92,6 +104,11 @@ module tiling_engine #(
     logic [$clog2(N)-1:0]        mm_result_row;
     logic signed [ACC_WIDTH-1:0] mm_drain [N];
     logic [CHUNK_W-1:0]          mm_k_chunks;
+
+    // perf nets
+    logic mm_in_fetch, mm_in_feed, mm_in_settle, mm_in_drain, mm_in_idle;
+    logic mm_chunk_done, mm_tile_done;
+    logic perf_clear_int;
 
     // output-buffer write-side nets
     logic                            c_wr_en;
@@ -185,6 +202,11 @@ module tiling_engine #(
     assign busy = (t_state != T_IDLE);
     assign done = (t_state == T_DONE);
 
+    // perf clear: host strobe, plus auto-clear on the accepted start
+    // (per-run numbers) unless AUTO_CLEAR=0
+    assign perf_clear_int = perf_clear
+                         || ((AUTO_CLEAR != 0) && (t_state == T_IDLE) && start);
+
     //----------------------------------------------------------------
     // Drain capture: each result_valid cycle carries one finished
     // C-tile row on the 4 drain lanes; pack lane 0 into bits [31:0]
@@ -217,7 +239,14 @@ module tiling_engine #(
         .busy         (mm_busy),
         .result_valid (mm_result_valid),
         .result_row   (mm_result_row),
-        .drain_out    (mm_drain)
+        .drain_out    (mm_drain),
+        .in_fetch     (mm_in_fetch),
+        .in_feed      (mm_in_feed),
+        .in_settle    (mm_in_settle),
+        .in_drain     (mm_in_drain),
+        .in_idle      (mm_in_idle),
+        .chunk_done   (mm_chunk_done),
+        .tile_done    (mm_tile_done)
     );
 
     tile_buffer #(
@@ -230,6 +259,23 @@ module tiling_engine #(
         .rd_en   (out_rd_en),
         .rd_addr (out_rd_addr),
         .rd_data (out_rd_data)
+    );
+
+    perf_counters #(
+        .NCTR(8), .CW(32)
+    ) u_perf (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .perf_clear (perf_clear_int),
+        .in_fetch   (mm_in_fetch),
+        .in_feed    (mm_in_feed),
+        .in_settle  (mm_in_settle),
+        .in_drain   (mm_in_drain),
+        .in_idle    (mm_in_idle),
+        .chunk_done (mm_chunk_done),
+        .tile_done  (mm_tile_done),
+        .perf_addr  (perf_addr),
+        .perf_data  (perf_data)
     );
 
 endmodule

@@ -7,9 +7,11 @@
 //   controller fetches/feeds k_chunks tile pairs, accumulating in
 //   the PEs, then settles and drains ONCE.
 //   Per-chunk indices are sampled while chunk_req is high (see
-//   controller v4 for the exact windows). k_chunks=1 is the plain
+//   controller for the exact windows). k_chunks=1 is the plain
 //   single-tile matmul.
 //   Results exit on drain_out, labeled by result_row.
+//   Perf flags pass straight through from the controller (pure
+//   observers - they feed no control logic).
 //====================================================================
 module matmul_unit #(
     parameter int N          = 4,
@@ -40,7 +42,16 @@ module matmul_unit #(
     output logic                          busy,
     output logic                          result_valid,
     output logic [$clog2(N)-1:0]          result_row,
-    output logic signed [ACC_WIDTH-1:0]   drain_out [N]
+    output logic signed [ACC_WIDTH-1:0]   drain_out [N],
+
+    // perf observation flags (passive pass-through from controller)
+    output logic                          in_fetch,
+    output logic                          in_feed,
+    output logic                          in_settle,
+    output logic                          in_drain,
+    output logic                          in_idle,
+    output logic                          chunk_done,
+    output logic                          tile_done
 );
 
     localparam int WORD_WIDTH = 32;
@@ -122,7 +133,14 @@ module matmul_unit #(
         .a_feed       (a_feed),
         .b_feed       (b_feed),
         .result_valid (result_valid),
-        .result_row   (result_row)
+        .result_row   (result_row),
+        .in_fetch     (in_fetch),
+        .in_feed      (in_feed),
+        .in_settle    (in_settle),
+        .in_drain     (in_drain),
+        .in_idle      (in_idle),
+        .chunk_done   (chunk_done),
+        .tile_done    (tile_done)
     );
 
     input_skew #(.N(N), .DATA_WIDTH(DATA_WIDTH)) u_skew_a (

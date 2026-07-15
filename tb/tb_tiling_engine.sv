@@ -9,6 +9,8 @@
 //   E2: 8x8x8 random     E3: 16x16x16 random (fills the buffers)
 //   E4: 8x16x4 random (non-cubic: unequal counters + address math)
 //   E5: two consecutive starts without reset, fresh data each
+//   E3 also dumps the perf counters (utilization baseline for
+//   docs/perf_baseline.md; AUTO_CLEAR makes them per-run).
 //====================================================================
 module tb_tiling_engine;
 
@@ -33,6 +35,9 @@ module tb_tiling_engine;
     logic                     out_rd_en;
     logic [OW-1:0]            out_rd_addr;
     logic [N*ACC_WIDTH-1:0]   out_rd_data;
+    logic                     perf_clear;
+    logic [3:0]               perf_addr;
+    logic [31:0]              perf_data;
 
     // full matrices (used region set per test)
     logic signed [DATA_WIDTH-1:0] A [MAX_DIM][MAX_DIM];
@@ -61,7 +66,10 @@ module tb_tiling_engine;
         .wr_data_b   (wr_data_b),
         .out_rd_en   (out_rd_en),
         .out_rd_addr (out_rd_addr),
-        .out_rd_data (out_rd_data)
+        .out_rd_data (out_rd_data),
+        .perf_clear  (perf_clear),
+        .perf_addr   (perf_addr),
+        .perf_data   (perf_data)
     );
 
     always #5 clk = ~clk;
@@ -133,9 +141,41 @@ module tb_tiling_engine;
     endtask
 
     //----------------------------------------------------------------
-    // Full round trip: load, start, wait done, read back, compare
+    // Perf access. read_perf CONTRACT: call at a negedge; address
+    // presented mid-cycle, DUT registers at the next posedge, value
+    // sampled at the next negedge (1 cycle per call).
     //----------------------------------------------------------------
-    task automatic run_case(input string name, input int mt, input int kt, input int nt);
+    task automatic read_perf(input int addr, output logic [31:0] val);
+        perf_addr = 4'(addr);
+        @(negedge clk);
+        val = perf_data;
+    endtask
+
+    task automatic dump_perf(input string tag);
+        logic [31:0] v0, v1, v2, v3, v4, v5, v6, v7;
+        int util_x10;
+        read_perf(0, v0);
+        read_perf(1, v1);
+        read_perf(2, v2);
+        read_perf(3, v3);
+        read_perf(4, v4);
+        read_perf(5, v5);
+        read_perf(6, v6);
+        read_perf(7, v7);
+        $display("[PERF %s] total=%0d fetch=%0d feed=%0d settle=%0d drain=%0d idle=%0d chunks=%0d tiles=%0d",
+                 tag, v0, v1, v2, v3, v4, v5, v6, v7);
+        util_x10 = (v2 * 1000) / v0;
+        $display("[PERF %s] utilization = feed/total = %0d.%0d%%",
+                 tag, util_x10 / 10, util_x10 % 10);
+    endtask
+
+    //----------------------------------------------------------------
+    // Full round trip: load, start, wait done, (optional perf dump
+    // right after completion, before readback pollutes idle/total),
+    // read back, compare
+    //----------------------------------------------------------------
+    task automatic run_case(input string name, input int mt, input int kt,
+                            input int nt, input int do_dump);
         int errs0;
         int gi, gj;
         logic [N*ACC_WIDTH-1:0] w;
@@ -155,6 +195,9 @@ module tb_tiling_engine;
         wait (done);                 // done must pulse (1 cycle)
         wait (!busy);
         @(negedge clk);
+
+        if (do_dump != 0)
+            dump_perf(name);
 
         errs0 = errors;
         for (int ti = 0; ti < mt; ti++)
@@ -190,6 +233,7 @@ module tb_tiling_engine;
         wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
         wr_en_b = 0; wr_addr_b = '0; wr_data_b = '0;
         out_rd_en = 0; out_rd_addr = '0;
+        perf_clear = 0; perf_addr = '0;
         for (int i = 0; i < MAX_DIM; i++)
             for (int j = 0; j < MAX_DIM; j++) begin
                 A[i][j] = '0;
@@ -204,25 +248,26 @@ module tb_tiling_engine;
                 A[i][j] = 8'(i - j);              // negatives included
                 B[i][j] = (i == j) ? 8'sd1 : 8'sd0;
             end
-        run_case("E1 8x8x8 fixed, B=identity", 2, 2, 2);
+        run_case("E1 8x8x8 fixed, B=identity", 2, 2, 2, 0);
 
         //--- E2: 8x8x8 random ----------------------------------------
         fill_random();
-        run_case("E2 8x8x8 random", 2, 2, 2);
+        run_case("E2 8x8x8 random", 2, 2, 2, 0);
 
         //--- E3: 16x16x16 random (fills all three buffers) ------------
+        //    perf dump = the utilization measurement of record
         fill_random();
-        run_case("E3 16x16x16 random", 4, 4, 4);
+        run_case("E3 16x16x16 random", 4, 4, 4, 1);
 
         //--- E4: 8x16x4 random (non-cubic, m=2 k=4 n=1 tiles) ---------
         fill_random();
-        run_case("E4 8x16x4 random", 2, 4, 1);
+        run_case("E4 8x16x4 random", 2, 4, 1, 0);
 
         //--- E5: two consecutive starts, no reset, fresh data ---------
         fill_random();
-        run_case("E5a consecutive start #1", 2, 2, 2);
+        run_case("E5a consecutive start #1", 2, 2, 2, 0);
         fill_random();
-        run_case("E5b consecutive start #2", 2, 2, 2);
+        run_case("E5b consecutive start #2", 2, 2, 2, 0);
 
         repeat (2) @(negedge clk);
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");

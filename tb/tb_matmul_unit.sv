@@ -38,6 +38,10 @@ module tb_matmul_unit;
     logic [$clog2(N)-1:0]         result_row;
     logic signed [ACC_WIDTH-1:0]  drain_out [N];
 
+    // perf flags: unused here (observed by tb_tiling_engine's counters)
+    logic mm_in_fetch, mm_in_feed, mm_in_settle, mm_in_drain, mm_in_idle;
+    logic mm_chunk_done, mm_tile_done;
+
     // current chunk's tile matrices: source for packing AND golden
     logic signed [DATA_WIDTH-1:0] a_tile [N][K];
     logic signed [DATA_WIDTH-1:0] b_tile [K][N];
@@ -72,7 +76,14 @@ module tb_matmul_unit;
         .busy         (busy),
         .result_valid (result_valid),
         .result_row   (result_row),
-        .drain_out    (drain_out)
+        .drain_out    (drain_out),
+        .in_fetch     (mm_in_fetch),
+        .in_feed      (mm_in_feed),
+        .in_settle    (mm_in_settle),
+        .in_drain     (mm_in_drain),
+        .in_idle      (mm_in_idle),
+        .chunk_done   (mm_chunk_done),
+        .tile_done    (mm_tile_done)
     );
 
     always #5 clk = ~clk;

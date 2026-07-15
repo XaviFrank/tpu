@@ -16,6 +16,11 @@
 //   high. k_chunks (>= 1; 0 is illegal) is latched once, at the
 //   accepted go.
 //
+//   Perf flags (in_*, chunk_done, tile_done) are explicit Moore
+//   outputs for perf_counters - pure observers, they feed no control
+//   logic. The raw state enum is never exported. S_INIT (one cycle
+//   after reset) is covered by no flag.
+//
 //   Strictly sequential: no fetch/feed/drain overlap (overlap engine
 //   is a ROADMAP item). k_chunks=1 reproduces v3 exactly.
 //====================================================================
@@ -58,7 +63,16 @@ module controller #(
 
     // result interface
     output logic                          result_valid,
-    output logic [$clog2(N)-1:0]          result_row
+    output logic [$clog2(N)-1:0]          result_row,
+
+    // perf observation flags (Moore, passive; see header)
+    output logic                          in_fetch,
+    output logic                          in_feed,
+    output logic                          in_settle,
+    output logic                          in_drain,
+    output logic                          in_idle,
+    output logic                          chunk_done,   // 1-cycle strobe
+    output logic                          tile_done     // 1-cycle strobe
 );
 
     //----------------------------------------------------------------
@@ -244,6 +258,15 @@ module controller #(
     assign result_valid = (state == S_DRAIN);
     assign result_row   = $clog2(N)'(N-1) - drain_cnt;
     assign valid_feed   = (state == S_FEED);
+
+    // perf flags: explicit Moore exports, never the raw enum
+    assign in_fetch     = (state == S_FETCH);
+    assign in_feed      = (state == S_FEED);
+    assign in_settle    = (state == S_SETTLE);
+    assign in_drain     = (state == S_DRAIN);
+    assign in_idle      = (state == S_IDLE);
+    assign chunk_done   = (state == S_FEED  && beat_cnt  == K-1);
+    assign tile_done    = (state == S_DRAIN && drain_cnt == N-1);
 
     for (genvar i = 0; i < N; i++) begin : gen_feed
         assign a_feed[i] = (state == S_FEED) ? a_tile[i][beat_cnt] : '0;

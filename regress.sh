@@ -26,13 +26,15 @@ run_tb () {
 
 run_tb tb_pe_os          rtl/mac_unit.sv rtl/os_pe.sv tb/tb_pe_os.sv
 run_tb tb_tile_buffer    rtl/tile_buffer.sv tb/tb_tile_buffer.sv
+run_tb tb_perf_counters  rtl/perf_counters.sv tb/tb_perf_counters.sv
 run_tb tb_systolic_array rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv tb/tb_systolic_array.sv
 run_tb tb_matmul_unit    rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
                          rtl/input_skew.sv rtl/tile_buffer.sv rtl/controller.sv \
                          rtl/matmul_unit.sv tb/tb_matmul_unit.sv
 run_tb tb_tiling_engine  rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
                          rtl/input_skew.sv rtl/tile_buffer.sv rtl/controller.sv \
-                         rtl/matmul_unit.sv rtl/tiling_engine.sv tb/tb_tiling_engine.sv
+                         rtl/matmul_unit.sv rtl/perf_counters.sv rtl/tiling_engine.sv \
+                         tb/tb_tiling_engine.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
