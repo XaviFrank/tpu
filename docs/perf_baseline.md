@@ -37,6 +37,54 @@ during the readout itself, so idle (read 5 cycles after total) carries a
 few extra post-run idle cycles; the per-state sums are consistent with
 total once that skew is accounted for.
 
+## After double-buffering: prediction (written BEFORE measuring)
+
+Controller v5 prefetches chunk c+1 into the shadow bank while chunk c
+feeds. The prefetch needs K issue cycles + 1 landing cycle = 5, but only
+K = 4 FEED cycles overlap it (the first issue can start on FEED's first
+cycle, since indices register at the FEED-entry edge). So exactly ONE
+un-hidden remainder cycle per interior chunk; the cold first chunk of
+each walk still pays the full 5.
+
+- fetch_cycles/tile = 5 (cold) + 3x1 (remainders) = 8 -> 128 total
+- feed unchanged 256; settle 128; drain 64
+- busy/tile = 8+16+8+4 = 36; total ≈ 16x38 ≈ 610
+- **predicted utilization ≈ 256/610 ≈ 42%**
+
 ## After double-buffering (measured, controller v5)
 
-_to be filled in step 2_
+```
+[PERF E3 16x16x16 random] total=609 fetch=128 feed=256 settle=128
+                          drain=64 idle=38 chunks=64 tiles=16
+[PERF E3 16x16x16 random] utilization = feed/total = 42.0%
+```
+
+E6 (same size, independent data) reproduces the numbers identically and
+asserts fetch_cycles(128) < feed_cycles(256) as the structural proof the
+overlap engaged.
+
+## Delta and reconciliation
+
+| metric        | v4 baseline | v5 double-buffered | delta          |
+|---------------|-------------|--------------------|----------------|
+| total_cycles  | 801         | 609                | -192 (-24.0%)  |
+| fetch_cycles  | 320         | 128                | -192 (-60.0%)  |
+| feed_cycles   | 256         | 256                | 0 (unchanged)  |
+| settle/drain  | 128 / 64    | 128 / 64           | 0 (untouched)  |
+| utilization   | 31.9%       | 42.0%              | +10.1 points   |
+
+Reconciliation: measured = predicted, exactly. fetch went from 20/tile
+(5 x 4 chunks) to 8/tile = 5 (cold first chunk, nothing to overlap with)
++ 3 x 1 (interior chunks). The remainder is exactly ONE cycle per interior
+chunk - not 0 and not 2 - because a prefetch needs K+1 = 5 cycles (K issue
+beats + 1 registered-read landing cycle) while only K = 4 FEED cycles can
+hide it: indices register at the FEED-entry edge, the first read issues on
+FEED's first cycle, the K-th read issues on FEED's last cycle, and its
+landing is the one cycle FEED cannot cover. Remainder 0 would need the
+chunk_req window one cycle earlier still (inside the previous remainder
+cycle - indices are not committed yet); remainder 2 was the cost of the
+initially-considered "register indices at FEED entry, first issue one
+cycle later" variant, avoided by starting the issue counter at the swap
+edge itself. The gap to 100% is now dominated by SETTLE (128) + DRAIN (64)
++ cold fetches (80) + engine idle (38): the next lever is the tile-level
+go/collect overlap noted in tiling_engine as a future optimization.

@@ -269,6 +269,27 @@ module tb_tiling_engine;
         fill_random();
         run_case("E5b consecutive start #2", 2, 2, 2, 0);
 
+        //--- E6: structural proof the prefetch overlap engaged --------
+        // E3-sized run; fetch_cycles < feed_cycles can only hold when
+        // fetching hides behind FEED (the v4 baseline had fetch=320 >
+        // feed=256; v5's remainder-only fetch is far below feed). This
+        // tests the OPTIMIZATION, not just result correctness.
+        fill_random();
+        run_case("E6 16x16x16 perf overlap", 4, 4, 4, 1);
+        begin
+            logic [31:0] fetch_c, feed_c;
+            read_perf(1, fetch_c);
+            read_perf(2, feed_c);
+            if (fetch_c < feed_c) begin
+                $display("PASS [E6b overlap engaged: fetch=%0d < feed=%0d]",
+                         fetch_c, feed_c);
+            end else begin
+                errors++;
+                $error("[E6b] fetch_cycles (%0d) !< feed_cycles (%0d) - overlap did not engage",
+                       fetch_c, feed_c);
+            end
+        end
+
         repeat (2) @(negedge clk);
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
         else             $display("\n=== %0d ERROR(S) ===", errors);

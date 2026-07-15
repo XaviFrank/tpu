@@ -399,6 +399,22 @@ module tb_matmul_unit;
         load_tile_b(15);
         run_tile("T10c k_chunks=1 again", 15, 15);
 
+        //--- T11: chunk_req contract: combinational answer -------------
+        // CONTRACT NOTE: the handshake is COMBINATIONAL-ANSWER - the
+        // issuer presents the next chunk's indices in the same cycle
+        // chunk_req is high (this TB answers at the mid-cycle negedge;
+        // tiling_engine answers combinationally from its counters,
+        // i.e. a 0-cycle delay). If a delayed-answer mode is ever
+        // needed, that is a spec change, not a TB tweak.
+        clear_golden();
+        for (int g = 0; g < 3; g++) begin
+            randomize_tiles();
+            load_tile_a(5 + g);
+            load_tile_b(12 + g);
+            accumulate_golden();
+        end
+        run_walk("T11 k_chunks=3, combinational chunk_req answer", 3, 5, 12);
+
         repeat (2) @(negedge clk);
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
         else             $display("\n=== %0d ERROR(S) ===", errors);
