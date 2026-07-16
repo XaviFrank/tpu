@@ -46,6 +46,10 @@ run_tb tb_ws_controller  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
 
 # --- requant/ReLU (shared INT32->INT8 core; vectors from gen_requant_vectors.py) ---
 run_tb tb_requant        rtl/requant.sv tb/tb_requant.sv
+run_tb tb_quant_engine   rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
+                         rtl/input_skew.sv rtl/tile_buffer.sv rtl/controller.sv \
+                         rtl/matmul_unit.sv rtl/perf_counters.sv rtl/tiling_engine.sv \
+                         rtl/requant.sv rtl/quant_engine.sv tb/tb_quant_engine.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
