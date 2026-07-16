@@ -36,5 +36,8 @@ run_tb tb_tiling_engine  rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
                          rtl/matmul_unit.sv rtl/perf_counters.sv rtl/tiling_engine.sv \
                          tb/tb_tiling_engine.sv
 
+# --- WS (weight-stationary) variant - parallel build, OS stays intact ---
+run_tb tb_ws_pe          rtl/ws_pe.sv tb/tb_ws_pe.sv
+
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
