@@ -50,6 +50,9 @@ run_tb tb_quant_engine   rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
                          rtl/input_skew.sv rtl/tile_buffer.sv rtl/controller.sv \
                          rtl/matmul_unit.sv rtl/perf_counters.sv rtl/tiling_engine.sv \
                          rtl/requant.sv rtl/quant_engine.sv tb/tb_quant_engine.sv
+run_tb tb_ws_quant_unit  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
+                         rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/requant.sv rtl/ws_quant_unit.sv tb/tb_ws_quant_unit.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
