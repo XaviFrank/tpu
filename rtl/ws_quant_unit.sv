@@ -11,7 +11,8 @@
 //   to the output skew - min(n_vecs, N) columns are valid in the
 //   same cycle, so one lane per column is required; a single shared
 //   lane would only suffice for n_vecs = 1. Measured cadence is
-//   certified in tb_ws_quant_unit.
+//   certified in tb_ws_quant_unit (N=4) and tb_ws_n16 (N=16).
+//   Word width follows ws_unit: one write word = N packed int8s.
 //   Config (relu_en/scale_mult/shift_amt) is per-tensor, shared by
 //   all lanes; plain ports until the AXI-Lite register file exists.
 //====================================================================
@@ -39,10 +40,10 @@ module ws_quant_unit #(
     // raw write ports (pass-through)
     input  logic                          wr_en_w,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_w,
-    input  logic [31:0]                   wr_data_w,
+    input  logic [N*DATA_WIDTH-1:0]       wr_data_w,
     input  logic                          wr_en_a,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_a,
-    input  logic [31:0]                   wr_data_a,
+    input  logic [N*DATA_WIDTH-1:0]       wr_data_a,
 
     // raw bottom-edge results (pass-through, column-skewed)
     output logic signed [ACC_WIDTH-1:0]   sum_out   [N],

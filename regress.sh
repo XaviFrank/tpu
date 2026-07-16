@@ -54,5 +54,10 @@ run_tb tb_ws_quant_unit  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv tb/tb_ws_quant_unit.sv
 
+# --- N=16 scaling checkpoint (same WS RTL, larger parameterization) ---
+run_tb tb_ws_n16         rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
+                         rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/requant.sv rtl/ws_quant_unit.sv tb/tb_ws_n16.sv
+
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL

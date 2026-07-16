@@ -3,7 +3,8 @@
 // ws_controller v1 (spec step 3): tile-lifecycle FSM for the
 // weight-stationary array. LOAD_WEIGHTS/STREAM skeleton, single
 // buffered: BRAM reads feed the array's top edge directly (the
-// double-buffered weight prefetch arrives in step 4).
+// double-buffered weight prefetch was dropped as obsolete-by-
+// construction - see docs/ws_design_notes.md).
 //
 //   go (w_tile_idx, a_base, n_vecs) ->
 //     W_LOAD  : N weight-buffer reads, tile rows fed BOTTOM-FIRST
@@ -14,26 +15,31 @@
 //               aligned in its column (bottom-first feeding aligns
 //               all rows simultaneously - see ws_pe). Duration
 //               N+2 cycles: 1 landing lead-in + N shifts + 1 capture.
-//               (PREDICTION - certified by tb_ws_controller.)
+//               (Certified at N=4 by tb_ws_controller; N=16 by
+//               tb_ws_n16.)
 //     W_STREAM: n_vecs activation words read back-to-back from the
 //               activation buffer (addr a_base+v) and fed through
 //               input_skew, one vector per cycle. Duration n_vecs+1
 //               (landing lead-in again).
 //     W_FLUSH : 2N+1 cycles; the last vector's column-(N-1) result
-//               is PREDICTED to appear on the last flush cycle, so
-//               every result is on the wires before busy falls.
-//               There is no SETTLE and no DRAIN: results exit
-//               continuously at the bottom edge, gated by the
-//               array's own sum_valid.
-//   -> W_IDLE. (The spec sketch's INIT(clear) state is dropped: WS
+//               appears on the last flush cycle, so every result is
+//               on the wires before busy falls. There is no SETTLE
+//               and no DRAIN: results exit continuously at the
+//               bottom edge, gated by the array's own sum_valid.
+//   -> W_IDLE. (The spec sketch's INIT(clear) state was dropped: WS
 //   has no persistent accumulator to clear, and valid gating covers
 //   post-reset X in the sum path - flagged deviation.)
 //
+//   Word width: one buffer word = one tile row = one activation
+//   vector = N packed int8s (N*DATA_WIDTH bits; 32 at N=4, 128 at
+//   N=16). K = words per weight tile = N rows; keep K a power of
+//   two (load_row's all-ones subtraction relies on it).
+//
 //   Result convention: bottom of column j = sum_i w[i][j]*a[i],
 //   i.e. y = W_loaded^T * a; hosts store weight tiles transposed.
-//   b_top's upper 24 bits are driven 0 during LOAD (capture uses
-//   the low byte only; the junk that shifts on afterward never has
-//   a valid attached).
+//   b_top's upper bits are driven 0 during LOAD (capture uses the
+//   low byte only; the junk that shifts on afterward never has a
+//   valid attached).
 //====================================================================
 module ws_controller #(
     parameter int N          = 4,
@@ -56,12 +62,12 @@ module ws_controller #(
     // weight-buffer read port (rd_data valid 1 cycle after rd_en)
     output logic                          rd_en_w,
     output logic [$clog2(DEPTH)-1:0]      rd_addr_w,
-    input  logic [31:0]                   rd_data_w,
+    input  logic [N*DATA_WIDTH-1:0]       rd_data_w,
 
     // activation-buffer read port
     output logic                          rd_en_a,
     output logic [$clog2(DEPTH)-1:0]      rd_addr_a,
-    input  logic [31:0]                   rd_data_a,
+    input  logic [N*DATA_WIDTH-1:0]       rd_data_a,
 
     // datapath control (drives ws_array / input_skew)
     output logic                          load_mode,
@@ -84,7 +90,7 @@ module ws_controller #(
     state_t state, state_next;
 
     //----------------------------------------------------------------
-    // Cycle budgets (predictions certified by TB - see header)
+    // Cycle budgets (certified by TB at N=4 and N=16 - see header)
     //----------------------------------------------------------------
     localparam int LOAD_CYCLES  = N + 2;
     localparam int FLUSH_CYCLES = 2*N + 1;

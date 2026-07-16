@@ -11,6 +11,9 @@
 //   CONTINUOUSLY at the bottom edge - no settle, no drain.
 //   sum_out[j]/sum_valid[j] are the raw bottom-edge column outputs
 //   (column j lags column 0 by j cycles; consumer deskews).
+//   Word width: one buffer word = one tile row = one activation
+//   vector = N packed int8s (element 0 in bits [7:0]); 32 bits at
+//   N=4, 128 at N=16.
 //   Result convention: sum_out[j] = sum_i w[i][j]*a[i]
 //   (y = W_loaded^T * a; hosts store weight tiles transposed).
 //====================================================================
@@ -31,20 +34,20 @@ module ws_unit #(
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
 
-    // raw write ports (one word = 4 packed int8s, element 0 in [7:0])
+    // raw write ports (one word = N packed int8s, element 0 in [7:0])
     input  logic                          wr_en_w,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_w,
-    input  logic [31:0]                   wr_data_w,
+    input  logic [N*DATA_WIDTH-1:0]       wr_data_w,
     input  logic                          wr_en_a,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_a,
-    input  logic [31:0]                   wr_data_a,
+    input  logic [N*DATA_WIDTH-1:0]       wr_data_a,
 
     // bottom-edge results (continuous, column-skewed)
     output logic signed [ACC_WIDTH-1:0]   sum_out   [N],
     output logic                          sum_valid [N]
 );
 
-    localparam int WORD_WIDTH = 32;
+    localparam int WORD_WIDTH = N * DATA_WIDTH;
 
     // controller <-> tile-buffer nets
     logic                         rd_en_w, rd_en_a;

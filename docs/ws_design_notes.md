@@ -54,19 +54,24 @@ mechanism that actually hides the shift-in. Worth revisiting if perf
 counters on real workloads show tile-swap overhead dominating (many small
 tiles, short activation streams).
 
-## Verified cycle budgets (N = K = 4, tb_ws_controller)
+## Verified cycle budgets (tb_ws_controller at N=4; tb_ws_n16 at N=16)
 
-| Phase | Predicted | Measured |
-|---|---|---|
-| W_LOAD (shift + capture + BRAM lead-in) | N+2 = 6 | 6 (spec guessed ~2N) |
-| W_STREAM (n_vecs + landing lead-in) | n_vecs+1 | 2 for n_vecs=1 |
-| W_FLUSH (last psum exits) | 2N+1 = 9 | 9 — last column's result lands on the final flush cycle |
-| 1-vector tile, total busy | 17 | 17 |
-| Back-to-back tiles (2×1-vector) | 34 busy + 1 idle | 34 busy |
+General formulas, certified at BOTH sizes:
+**LOAD = N+2, STREAM = n_vecs+1, FLUSH = 2N+1, busy = 3N+4+n_vecs.**
 
-Per-tile swap overhead is **FLUSH 9 + LOAD 6 = 15 cycles**, independent of
-`n_vecs` — amortized by streaming more vectors per resident tile, which is
-the batching story (out of scope here).
+| Phase | Predicted | Measured N=4 | Measured N=16 |
+|---|---|---|---|
+| W_LOAD | N+2 | 6 (spec guessed ~2N) | 18 |
+| W_STREAM | n_vecs+1 | 2 (nv=1) | 2 / 5 (nv=1 / 4) |
+| W_FLUSH | 2N+1 | 9 | 33 |
+| busy, 1-vector tile | 3N+5 | 17 | 53 |
+| busy, 4-vector tile | 3N+8 | — | 56 |
+| Back-to-back tiles (2×1-vec, N=4) | 34 busy + 1 idle | 34 busy | — |
+| Output cadence peak | min(n_vecs, N) | 1 / 4 | 1 / 4 |
+
+Per-tile swap overhead is **FLUSH + LOAD = 3N+3 cycles** (15 at N=4, 51 at
+N=16), independent of `n_vecs` — amortized by streaming more vectors per
+resident tile, which is the batching story (out of scope here).
 
 ## Synthesis: DSP48 inference (bug iterations, post-merge)
 
@@ -135,7 +140,48 @@ registers. If DSP = 16 but LUT/FF stay at iteration-2 levels, the C-port
 add still isn't packing and the next suspect is the b_in fan-in
 (sum_reg also feeds the w_capture byte mux).
 
-*(Measured: pending human re-synth — fill in here.)*
+*(Measured: human reported "confirmed cost-per-lane" in the N=16 spec,
+implying fusion confirmed — exact numbers still to be logged here.)*
+
+## Requant integration (see reports/report-requant.md)
+
+4 lanes per integration (OS: buffer-read tap in quant_engine; WS: live
+bottom-edge tap in ws_quant_unit). Cadence measured: min(n_vecs, N)
+columns valid simultaneously. Per-lane synth cost: the 32×16 scale
+multiply exceeds one DSP48's 27×18 → predicted 2 DSP/lane (human
+confirmed at N=4 per the N=16 spec).
+
+## N=16 scaling checkpoint (verification spec, 2026-07-16)
+
+Parameterization gap found and fixed (mechanical): buffer word width was
+hardcoded 32-bit in ws_controller's rd_data ports, ws_unit's WORD_WIDTH +
+write ports, ws_quant_unit's write ports; now N*DATA_WIDTH (one word =
+one tile row = one activation vector; 128-bit at N=16). Everything else
+was already generate-loop parameterized. N=4 defaults unchanged; full
+N=4 regression untouched and green.
+
+**Functional at N=16 (tb_ws_n16, measured):** raw 16×16 matvec exact,
+identity-quant int8 + ReLU correct, busy = 53 (nv=1) and 56 (nv=4),
+cadence peak = min(n_vecs, N). All formulas held — see cycle-budget
+table above.
+
+**Synthesis predictions (written before the human's N=16 synth run):**
+
+| Quantity | Predicted N=16 | Basis | Measured |
+|---|---|---|---|
+| Array DSP | 256 (N²) | 1 fused DSP/PE (iteration 3) | *(pending)* |
+| Requant DSP | 32 (2 × 16 lanes) | confirmed 2/lane at N=4 | *(pending)* |
+| Total DSP | 288 | | *(pending)* |
+| u_array LUT | ~2,600 | ~10 LUT/PE × 256, scales N² | *(pending)* |
+| ws_quant_unit LUT | ~4,000 | array 2.6k + 4× requant + glue | *(pending)* |
+| ws_quant_unit FF | ~2,000 | skew Σ(i+1)·9b ≈ 1.2k + array ~640 | *(pending)* |
+| BRAM | 1 RAMB36-equiv (2×64×128 as RAMB18) | same packing as N=4 | *(pending)* |
+| WNS | within ~1 ns of N=4 | per-PE paths N-independent; RISK: load_mode/w_capture/valid broadcast fanout to 256 PEs | *(pending)* |
+
+If WNS slips well past 1 ns, the broadcast fanout is the first suspect —
+the fix direction is registered fanout duplication (a control-tree
+pipeline stage), which would add 1 cycle to LOAD and shift feed timing;
+flag before implementing.
 
 ## Conventions
 
@@ -143,7 +189,8 @@ add still isn't packing and the next suspect is the b_in fan-in
   `y = W_loaded^T · a`. Hosts store weight tiles **transposed** to compute
   `y = W·a`.
 - Weight tile in the buffer: word `i` (at `tile_idx*K + i`) = resident row
-  `i`, lane `j` (bits `[8j+7:8j]`) = column `j`.
+  `i`, lane `j` (bits `[8j+7:8j]`) = column `j`. One word = N packed
+  int8s (32-bit at N=4, 128-bit at N=16); K = words/tile = N, power of 2.
 - Activation word: lane `i` feeds array row `i`; one word = one vector.
 - Column outputs are skewed (column j lags column 0 by j cycles) and exit
   continuously, gated by `sum_valid` — no drain. Consumers deskew.
