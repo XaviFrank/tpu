@@ -62,5 +62,8 @@ run_tb tb_ws_n16         rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv tb/tb_ws_n16.sv
 
+# --- AXI-Lite control wrapper (control plane; CDC from spec step 3 on) ---
+run_tb tb_axi_lite_ctrl  rtl/axi_lite_ctrl.sv tb/tb_axi_lite_ctrl.sv
+
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
