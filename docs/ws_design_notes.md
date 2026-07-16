@@ -68,6 +68,34 @@ Per-tile swap overhead is **FLUSH 9 + LOAD 6 = 15 cycles**, independent of
 `n_vecs` — amortized by streaming more vectors per resident tile, which is
 the batching story (out of scope here).
 
+## Synthesis: DSP48 inference (bug found post-merge)
+
+First `ws_unit` synth came back **0 DSP**, `u_array` = 1176 LUT / 784 FF /
+176 CARRY8 (~73 LUT/PE) — all arithmetic in fabric. Root cause: `ws_pe`
+was missing the `(* use_dsp = "yes" *)` attribute that `mac_unit` carries
+(its header: "necessary to cut down on LUTs"). Structural checks came back
+clean against the working OS reference: datapath regs unreset (same
+split), mode mux in the same always block as the arithmetic (same shape as
+mac_unit's clear/drain/accumulate mux, which infers fine WITH the
+attribute). Vivado's default heuristic simply leaves 8×8 multiplies in LUT
+fabric — the same natural cause as the Phase 2 OS incident; the attribute
+is the established fix, not a paper-over. Applied at MODULE scope (as in
+mac_unit), not on `product` alone, so the `b_in + product` post-add folds
+into the DSP48's post-adder rather than only the multiply.
+
+**Prediction before re-synth (N=4):**
+- DSPs: **16** (1 per PE — M-reg = `product`, P-reg = `sum_reg`,
+  C-port = `b_in`; the LOAD/idle passthrough should map to OPMODE
+  selection, i.e. P = C vs P = C + M)
+- `u_array` LUTs: collapse from 1176 to a small residual (w_capture byte
+  mux + whatever of the mode select doesn't fold into OPMODE). Not
+  necessarily OS's 17 — the WS vertical path is 32-bit — but well under
+  ~200. CARRY8 ≈ 0.
+- Partial-fix signature to watch for (per the bug report): DSP = 16 but
+  LUTs still ~1000 ⇒ multiply folded, post-add didn't.
+
+*(Measured: pending human re-synth — fill in here.)*
+
 ## Conventions
 
 - Result: bottom of column j yields `sum_i w[i][j] * a[i]`, i.e.

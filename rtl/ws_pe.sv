@@ -27,7 +27,12 @@
 //     tiles transposed to get y = W*a.
 //   Reset style: control regs (valids) async reset; datapath regs
 //   (w_reg, sum_reg, product, a_out) unreset - valid gates them.
+//   use_dsp: same necessity as mac_unit (see its header) - Vivado's
+//   default heuristic leaves 8x8 multiplies in LUT fabric; module
+//   scope so the b_in + product post-add folds into the DSP48 too,
+//   not just the multiply.
 //====================================================================
+(* use_dsp = "yes" *) // necessary to cut down on LUTs (as mac_unit)
 module ws_pe #(
     parameter DATA_WIDTH = 8,
     parameter ACC_WIDTH  = 32
