@@ -1,7 +1,9 @@
 `timescale 1ns / 1ps
 //====================================================================
-// tb_axi_lite_ctrl v3 (spec step 4): full integration - axi_lite_ctrl
-// driving a REAL ws_quant_unit (N=4) across genuinely asynchronous
+// tb_axi_lite_ctrl v4: full integration through ws_tpu_top (the real
+// chip-level top; connectivity lives in RTL now, this TB checks it)
+// - axi_lite_ctrl driving a REAL ws_quant_unit (N=4) across genuinely
+// asynchronous
 // clocks (aclk 100 MHz fixed; cclk ~263 MHz average with random
 // per-half-cycle jitter, so the phase relationship sweeps through
 // all alignments across the run - spec section 5).
@@ -18,8 +20,8 @@
 //         ever old/first/final (never torn), converges on the final
 //         value, and a run then streams exactly that many vectors.
 //   P3: held-RREADY read at the end - rvalid/rdata stable.
-// Single-tile scope: w_tile_idx/a_base tied 0 (no registers in the
-// spec map). Buffer preload uses the raw write ports on the core
+// Single-tile scope: w_tile_idx/a_base tied 0 INSIDE ws_tpu_top.
+// Buffer preload uses the raw write ports on the core
 // clock - data movement is the future DMA/AXI-HP path, not AXI-Lite.
 //====================================================================
 module tb_axi_lite_ctrl;
@@ -85,18 +87,10 @@ module tb_axi_lite_ctrl;
     logic [1:0]  rresp;
 
     //----------------------------------------------------------------
-    // Core-side nets (axi_lite_ctrl <-> ws_quant_unit) + WS extras
+    // TB-driven core-domain nets (raw write ports = future DMA path);
+    // control wiring now lives inside ws_tpu_top - whitebox monitors
+    // reach it hierarchically (dut.core_go, dut.core_n_vecs)
     //----------------------------------------------------------------
-    logic                        core_go, core_busy;
-    logic [VEC_W-1:0]            core_n_vecs;
-    logic                        core_relu_en;
-    logic signed [15:0]          core_scale_mult;
-    logic [4:0]                  core_shift_amt;
-    logic [3:0]                  core_perf_addr;
-    logic [31:0]                 core_perf_data;
-
-    logic [3:0]                  w_tile_idx;   // tied 0: single-tile scope
-    logic [5:0]                  a_base;       // tied 0
     logic                        perf_clear;   // tied 0 (no AXI clear bit)
     logic                        wr_en_w, wr_en_a;
     logic [5:0]                  wr_addr_w, wr_addr_a;
@@ -110,67 +104,43 @@ module tb_axi_lite_ctrl;
     int go_seen = 0;
     int go_base = 0;
 
-    axi_lite_ctrl #(
-        .VEC_W(VEC_W), .SCALE_WIDTH(16), .SHIFT_WIDTH(5)
-    ) dut (
-        .s_axi_aclk      (aclk),
-        .s_axi_aresetn   (aresetn),
-        .s_axi_awvalid   (awvalid),
-        .s_axi_awready   (awready),
-        .s_axi_awaddr    (awaddr),
-        .s_axi_wvalid    (wvalid),
-        .s_axi_wready    (wready),
-        .s_axi_wdata     (wdata),
-        .s_axi_wstrb     (wstrb),
-        .s_axi_bvalid    (bvalid),
-        .s_axi_bready    (bready),
-        .s_axi_bresp     (bresp),
-        .s_axi_arvalid   (arvalid),
-        .s_axi_arready   (arready),
-        .s_axi_araddr    (araddr),
-        .s_axi_rvalid    (rvalid),
-        .s_axi_rready    (rready),
-        .s_axi_rdata     (rdata),
-        .s_axi_rresp     (rresp),
-        .core_clk        (cclk),
-        .core_rst_n      (crst_n),
-        .core_go         (core_go),
-        .core_busy       (core_busy),
-        .core_n_vecs     (core_n_vecs),
-        .core_relu_en    (core_relu_en),
-        .core_scale_mult (core_scale_mult),
-        .core_shift_amt  (core_shift_amt),
-        .core_perf_addr  (core_perf_addr),
-        .core_perf_data  (core_perf_data)
-    );
-
-    ws_quant_unit #(
+    ws_tpu_top #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
-        .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH)
-    ) u_ws (
-        .clk        (cclk),
-        .rst_n      (crst_n),
-        .go         (core_go),
-        .w_tile_idx (w_tile_idx),
-        .a_base     (a_base),
-        .n_vecs     (core_n_vecs),
-        .busy       (core_busy),
-        .perf_clear (perf_clear),
-        .perf_addr  (core_perf_addr),
-        .perf_data  (core_perf_data),
-        .wr_en_w    (wr_en_w),
-        .wr_addr_w  (wr_addr_w),
-        .wr_data_w  (wr_data_w),
-        .wr_en_a    (wr_en_a),
-        .wr_addr_a  (wr_addr_a),
-        .wr_data_a  (wr_data_a),
-        .sum_out    (sum_out),
-        .sum_valid  (sum_valid),
-        .q8_out     (q8_out),
-        .q8_valid   (q8_valid),
-        .relu_en    (core_relu_en),
-        .scale_mult (core_scale_mult),
-        .shift_amt  (core_shift_amt)
+        .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH),
+        .SCALE_WIDTH(16), .SHIFT_WIDTH(5)
+    ) dut (
+        .s_axi_aclk    (aclk),
+        .s_axi_aresetn (aresetn),
+        .s_axi_awvalid (awvalid),
+        .s_axi_awready (awready),
+        .s_axi_awaddr  (awaddr),
+        .s_axi_wvalid  (wvalid),
+        .s_axi_wready  (wready),
+        .s_axi_wdata   (wdata),
+        .s_axi_wstrb   (wstrb),
+        .s_axi_bvalid  (bvalid),
+        .s_axi_bready  (bready),
+        .s_axi_bresp   (bresp),
+        .s_axi_arvalid (arvalid),
+        .s_axi_arready (arready),
+        .s_axi_araddr  (araddr),
+        .s_axi_rvalid  (rvalid),
+        .s_axi_rready  (rready),
+        .s_axi_rdata   (rdata),
+        .s_axi_rresp   (rresp),
+        .core_clk      (cclk),
+        .core_rst_n    (crst_n),
+        .wr_en_w       (wr_en_w),
+        .wr_addr_w     (wr_addr_w),
+        .wr_data_w     (wr_data_w),
+        .wr_en_a       (wr_en_a),
+        .wr_addr_a     (wr_addr_a),
+        .wr_data_a     (wr_data_a),
+        .perf_clear    (perf_clear),
+        .sum_out       (sum_out),
+        .sum_valid     (sum_valid),
+        .q8_out        (q8_out),
+        .q8_valid      (q8_valid)
     );
 
     //----------------------------------------------------------------
@@ -179,7 +149,7 @@ module tb_axi_lite_ctrl;
     // write check: never an intermediate, neither-old-nor-new value)
     //----------------------------------------------------------------
     always @(posedge cclk)
-        if (crst_n && core_go === 1'b1) go_seen = go_seen + 1;
+        if (crst_n && dut.core_go === 1'b1) go_seen = go_seen + 1;
 
     int got     [4][16];
     int got_cnt [4];
@@ -201,10 +171,10 @@ module tb_axi_lite_ctrl;
 
     always @(posedge cclk) begin
         if (nv_mon_en != 0) begin
-            if (core_n_vecs !== nv_ok0 && core_n_vecs !== nv_ok1
-                && core_n_vecs !== nv_ok2) begin
+            if (dut.core_n_vecs !== nv_ok0 && dut.core_n_vecs !== nv_ok1
+                && dut.core_n_vecs !== nv_ok2) begin
                 nv_viol = nv_viol + 1;
-                $error("[F3] torn N_VECS at core: %0d", core_n_vecs);
+                $error("[F3] torn N_VECS at core: %0d", dut.core_n_vecs);
             end
         end
     end
@@ -467,7 +437,7 @@ module tb_axi_lite_ctrl;
         aresetn = 0; crst_n = 0;
         awvalid = 0; awaddr = '0; wvalid = 0; wdata = '0; wstrb = 4'hF;
         bready = 0; arvalid = 0; araddr = '0; rready = 0;
-        w_tile_idx = '0; a_base = '0; perf_clear = 0;
+        perf_clear = 0;
         wr_en_w = 0; wr_addr_w = '0; wr_data_w = '0;
         wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
         nv_ok0 = '0; nv_ok1 = '0; nv_ok2 = '0;
@@ -534,11 +504,11 @@ module tb_axi_lite_ctrl;
             repeat (20) @(negedge aclk);
             nv_mon_en = 0;
             errors = errors + nv_viol;
-            if (core_n_vecs !== 4'd5) begin
+            if (dut.core_n_vecs !== 4'd5) begin
                 errors++;
-                $error("[F3] core n_vecs = %0d, expected final 5", core_n_vecs);
+                $error("[F3] core n_vecs = %0d, expected final 5", dut.core_n_vecs);
             end
-            if (nv_viol == 0 && core_n_vecs === 4'd5)
+            if (nv_viol == 0 && dut.core_n_vecs === 4'd5)
                 $display("PASS [F3] b2b N_VECS: never torn, converged on 5");
             run_via_axi(5, 0, 0, "F3 stream n_vecs=5");
         end

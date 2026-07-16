@@ -68,7 +68,7 @@ run_tb tb_axi_lite_ctrl  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv \
                          rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
-                         rtl/axi_lite_ctrl.sv tb/tb_axi_lite_ctrl.sv
+                         rtl/axi_lite_ctrl.sv rtl/ws_tpu_top.sv tb/tb_axi_lite_ctrl.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
