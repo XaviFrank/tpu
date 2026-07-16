@@ -30,3 +30,24 @@ Properties:
   cycle after reset) is covered by no state flag.
 - **Utilization definition used in perf_baseline.md:**
   `feed_cycles / total_cycles`.
+
+## WS counter map (ws_perf_counters instance inside ws_unit)
+
+Same hardware (`perf_counters`), WS categories. Read over AXI-Lite via
+PERF_SEL (0x10) / PERF_DATA (0x14) in `axi_lite_ctrl`.
+
+| idx | name          | meaning                                    |
+|-----|---------------|--------------------------------------------|
+| 0   | total_cycles  | every cycle since perf_clear release        |
+| 1   | load_cycles   | cycles in W_LOAD (= N+2 per tile)           |
+| 2   | stream_cycles | cycles in W_STREAM (= n_vecs+1 per tile)    |
+| 3   | flush_cycles  | cycles in W_FLUSH (= 2N+1 per tile)         |
+| 4   | (unused)      | reads 0                                     |
+| 5   | idle_cycles   | cycles in W_IDLE                            |
+| 6   | (unused)      | reads 0                                     |
+| 7   | tile_swaps    | count of weight-tile loads (1 per go)       |
+
+Indices 0/5/7 deliberately match the OS map (total/idle/tile count) so
+host code can share offsets. Counters saturate; out-of-range reads 0.
+No AXI perf_clear bit yet (counters count from core reset; hosts use
+deltas) — first candidate for a CTRL bit when needed.
