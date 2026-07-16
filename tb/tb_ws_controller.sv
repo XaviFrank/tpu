@@ -8,6 +8,14 @@
 //       manual two's complement packing, no $signed)
 //   T2: second go on a different tile/vector - clean re-load, no
 //       corruption from tile 1
+//   T3: back-to-back tiles (spec step 4, revised): second go issued
+//       on the FIRST idle cycle after the first tile - per-column
+//       results of both tiles collected in order, total busy
+//       exactly 2x17 with a 1-cycle idle gap. Certifies the swap
+//       cost: FLUSH 9 + LOAD 6 = 15 busy cycles per swap, with the
+//       BRAM fetch already folded into the LOAD shift (the staging
+//       double-buffer was dropped as obsolete-by-construction; see
+//       docs/ws_design_notes.md).
 //   Timing certification (written-down predictions, spec 3.3/8):
 //       LOAD = N+2 = 6, STREAM = n_vecs+1 = 2, FLUSH = 2N+1 = 9
 //       => busy exactly 17 cycles per 1-vector tile, and every
@@ -70,7 +78,9 @@ module tb_ws_controller;
     int a1 [4];      // activation vector 1
     int w2 [4][4];   // tile idx 0
     int a2 [4];
-    int y_exp [4];   // per-test expected column outputs
+    int y_exp  [4];  // per-test expected column outputs
+    int y1_exp [4];  // T3: expected for tile A
+    int y2_exp [4];  // T3: expected for tile B
 
     //----------------------------------------------------------------
     // Pack 4 int8 values into one buffer word, element 0 in [7:0].
@@ -124,15 +134,18 @@ module tb_ws_controller;
         end
     end
 
+    task automatic clear_collectors();
+        for (int j = 0; j < N; j++) got_cnt[j] = 0;
+        busy_cycles  = 0;
+        late_results = 0;
+    endtask
+
     //----------------------------------------------------------------
     // Run one tile and check every column against y_exp
     //----------------------------------------------------------------
     task automatic run_and_check(input int tile, input int base,
                                  input int nv, input string name);
-        // clear collection state
-        for (int j = 0; j < N; j++) got_cnt[j] = 0;
-        busy_cycles  = 0;
-        late_results = 0;
+        clear_collectors();
 
         @(negedge clk) begin
             go         = 1;
@@ -218,6 +231,55 @@ module tb_ws_controller;
                 y_exp[j] = y_exp[j] + w2[i][j]*a2[i];
         end
         run_and_check(0, 3, 1, "T2 reload tile0");
+
+        //--- T3: back-to-back tiles (step 4, revised) -----------------
+        // Buffers already hold tile 2 + vector@7 and tile 0 + vector@3.
+        // Issue the second go on the FIRST idle cycle after the first
+        // tile; collectors accumulate both tiles' results in order.
+        for (int j = 0; j < 4; j++) begin
+            y1_exp[j] = 0;
+            y2_exp[j] = 0;
+            for (int i = 0; i < 4; i++) begin
+                y1_exp[j] = y1_exp[j] + w1[i][j]*a1[i];
+                y2_exp[j] = y2_exp[j] + w2[i][j]*a2[i];
+            end
+        end
+
+        clear_collectors();
+        @(negedge clk) begin
+            go = 1; w_tile_idx = 2; a_base = 7; n_vecs = 1;
+        end
+        @(negedge clk) go = 0;
+        while (busy) @(negedge clk);
+        // this IS the single idle cycle: re-issue immediately
+        go = 1; w_tile_idx = 0; a_base = 3; n_vecs = 1;
+        @(negedge clk) go = 0;
+        while (busy) @(negedge clk);
+        @(negedge clk);   // settle-out for the collectors
+
+        for (int j = 0; j < 4; j++) begin
+            if (got_cnt[j] !== 2) begin
+                errors++;
+                $error("[T3 b2b] column %0d: %0d results, expected 2", j, got_cnt[j]);
+            end else if (got[j][0] !== y1_exp[j] || got[j][1] !== y2_exp[j]) begin
+                errors++;
+                $error("[T3 b2b] col %0d = (%0d,%0d), expected (%0d,%0d)",
+                       j, got[j][0], got[j][1], y1_exp[j], y2_exp[j]);
+            end else begin
+                $display("PASS [T3 b2b] col %0d = (%0d,%0d)", j, got[j][0], got[j][1]);
+            end
+        end
+        // swap-cost certification: two 17-cycle tiles, 1-cycle gap
+        if (busy_cycles !== 2*PRED_BUSY_1VEC) begin
+            errors++;
+            $error("[T3 timing] busy = %0d cycles, predicted %0d", busy_cycles, 2*PRED_BUSY_1VEC);
+        end else begin
+            $display("PASS [T3 timing] busy = %0d cycles across both tiles (swap = FLUSH 9 + LOAD 6)", busy_cycles);
+        end
+        if (late_results !== 0) begin
+            errors++;
+            $error("[T3 b2b] %0d result(s) arrived after busy fell", late_results);
+        end
 
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge clk);
