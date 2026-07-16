@@ -5,35 +5,36 @@
 //     held fixed across STREAM; the partial sum flows DOWN through
 //     sum_reg every cycle (no local persistent accumulator, no
 //     SETTLE/DRAIN)
-//   - the vertical port pair (b_in -> sum_reg -> b_out) is retasked
-//     by mode:
-//       LOAD  (load_mode=1): sum_reg <= b_in - raw passthrough, the
-//         column acts as a shift register carrying weight words
-//         (weight value in the low DATA_WIDTH bits)
-//       STREAM(load_mode=0): sum_reg <= b_in + product - accumulate
-//         the local contribution onto the psum from above and pass on
+//   - vertical path (b_in -> sum_reg -> b_out) is a STATIC
+//     mult-add: sum_reg <= b_in + product, every cycle, no mode
+//     mux (DSP48 fusion: product = MREG, sum_reg = PREG, b_in on
+//     the C port - see the 2-DSP/PE bug trail in
+//     docs/ws_design_notes.md). Mode behavior falls out of the
+//     product gating:
+//       LOAD : valid is low, so product is 0 and the column is a
+//         pure shift register carrying weight words (low byte)
+//       STREAM: product = a*w of the beat that arrived last cycle
+//   - CONTRACT (tripwire below): valid_in must be low >= 1 cycle
+//     before and throughout LOAD, or the shifting weights would be
+//     corrupted by a live product. The controller's FLUSH state
+//     (2N+1 cycles between STREAM and any LOAD) guarantees it.
+//   - product gating is a mux AFTER the multiply
+//     (valid ? a*w : 0), not on the operand: 0*X is X in 4-state
+//     sim (w_reg is X before the first capture), and this form
+//     maps to the DSP48 MREG's synchronous reset (RSTM = !valid).
 //   - w_capture (broadcast, 1 cycle): w_reg <= sum_reg's low byte.
-//     The controller times it so every PE's target weight sits in its
-//     sum_reg on the same cycle (feed rows bottom-first: after N
-//     shifts all rows align; predicted load = N+1 cycles total).
-//   - 2-stage MAC discipline (as mac_unit): the product of the
+//     The controller times it so every PE's target weight sits in
+//     its sum_reg on the same cycle (rows fed bottom-first).
+//   - 2-stage MAC discipline (as mac_unit): product of the
 //     JUST-ARRIVED a_in is registered, then added the next cycle.
-//     Both the psum and the product advance one row per cycle, so
-//     the OS diagonal skew (input_skew, row i delayed i) still
-//     aligns. valid travels with a; sum_valid marks b_out as a
-//     completed contribution (piped valid, one stage behind product).
+//     Psum and product both advance one row per cycle, so the OS
+//     diagonal skew (input_skew) still aligns. valid travels with
+//     a; sum_valid marks b_out as a completed contribution.
 //   - array-level result convention: bottom of column j yields
 //     sum_i w[i][j]*a[i], i.e. y = W_loaded^T * a. Loaders store
 //     tiles transposed to get y = W*a.
 //   Reset style: control regs (valids) async reset; datapath regs
 //   (w_reg, sum_reg, product, a_out) unreset - valid gates them.
-//   use_dsp: scoped to the PRODUCT signal only (2-DSP/PE bug,
-//   docs/ws_design_notes.md): module scope forced the 32-bit
-//   sum_reg add into a second DSP48 ALU instead of letting it fuse
-//   as the multiply-DSP's post-add. Note ws_pe's mode select is on
-//   the X/Y side (M vs 0, C constant) - the inverse of mac_unit's
-//   Z-side loadable-MACC template (P vs C) - which is the suspect
-//   if fusion still fails with the narrowed scope.
 //====================================================================
 module ws_pe #(
     parameter DATA_WIDTH = 8,
@@ -55,7 +56,7 @@ module ws_pe #(
 
     logic signed [DATA_WIDTH-1:0]   w_reg;
     logic signed [ACC_WIDTH-1:0]    sum_reg;
-    (* use_dsp = "yes" *)                            // multiplier only - see header
+    (* use_dsp = "yes" *)                            // multiplier anchor - see header
     logic signed [2*DATA_WIDTH-1:0] product;
     logic                           valid_pipe;
 
@@ -72,23 +73,32 @@ module ws_pe #(
         end
     end
 
-    // Datapath: no reset. Priority load_mode > accumulate mirrors the
-    // OS accumulator's clear > drain > accumulate mux structure.
+    // Datapath: no reset. Stage 2 is deliberately mux-free (static
+    // P = C + M); all gating happens at the product register.
     always_ff @(posedge clk) begin
-        a_out   <= a_in;                             // 1-cycle hop right
-        product <= a_in * w_reg;                     // stage 1: just-arrived a
+        a_out <= a_in;                               // 1-cycle hop right
+
+        if (valid_in)
+            product <= a_in * w_reg;                 // stage 1: just-arrived a
+        else
+            product <= '0;                           // DSP48 RSTM form; X-safe
 
         if (w_capture)
             w_reg <= sum_reg[DATA_WIDTH-1:0];        // same-width, no extension
 
-        if (load_mode)
-            sum_reg <= b_in;                         // weight-shift passthrough
-        else if (valid_pipe)
-            sum_reg <= b_in + product;               // stage 2: accumulate-and-pass
-        else
-            sum_reg <= b_in;                         // psum flows on, no contribution
+        sum_reg <= b_in + product;                   // stage 2: accumulate-and-pass
     end
 
     assign b_out = sum_reg;
+
+`ifndef SYNTHESIS
+    // contract tripwire: a live product entering LOAD would corrupt
+    // the weight shift (same hazard class as the OS drain/feed and
+    // bank-landing tripwires)
+    always @(posedge clk)
+        if (rst_n && load_mode && (valid_in || valid_pipe))
+            $error("ws_pe: valid activity during LOAD_WEIGHTS (valid_in=%b valid_pipe=%b)",
+                   valid_in, valid_pipe);
+`endif
 
 endmodule

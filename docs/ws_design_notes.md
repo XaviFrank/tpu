@@ -98,17 +98,42 @@ Register-by-register diff against mac_unit found the template difference:
   `sum_reg <= b_in` (P = C) vs `sum_reg <= b_in + product` (P = C + M),
   Z constant. Inverse of the recognized template.
 
-Fix attempt (one variable): `use_dsp` moved from module scope to the
-`product` signal only, so only the multiply is forced into a DSP and the
-post-add is left to Vivado's own fusion/packing.
+Fix attempt (one variable, commit 9898d28): `use_dsp` moved from module
+scope to the `product` signal only.
 
-**Prediction before re-synth:** DSP = 16, LUT stays ≤ ~145.
-**Discriminator:** if DSP = 16 but LUT *rises* by roughly a 32-bit
-adder+mux per PE (several hundred total), fusion is still blocked — the
-X/Y-side mode select is the real cause, and the queued next change is to
-make stage 2 unconditional by gating the product operand at stage 1
-(`product <= (valid gate ? a : 0) * w_reg`-style), which restores the
-pure static `P = C + M` shape at the cost of a small per-PE operand mux.
+**Prediction:** DSP = 16 with LUT ≤ ~145 if fusion works; DSP = 16 with
+LUTs RISING ⇒ fusion still blocked by the X/Y-side select.
+**Measured: DSP = 16, LUT 353, FF 364, CARRY8 48** — the discriminator's
+second arm: multiply in DSPs, 32-bit add + result mux + sum_reg all in
+fabric. X/Y-side mode select confirmed as the fusion blocker.
+(BRAM = 1 at unit level: the two 64×32 tile_buffers pack as 2 RAMB18 in
+one RAMB36 tile — expected, not part of this bug.)
+
+### Iteration 3: static P = C + M, gating moved into the product register
+
+Stage 2 is now mux-free — `sum_reg <= b_in + product` unconditionally —
+and all gating happens at stage 1:
+`product <= valid_in ? (a_in * w_reg) : '0`.
+
+- Cycle-exact equivalent to the old stage-2 gating
+  (`valid_pipe(t) = valid_in(t-1)`, so both produce
+  `sum_reg(t) = b_in + (valid_in(t-1) ? a(t-1)*w : 0)`).
+- The LOAD passthrough arm is gone: during LOAD, product is provably 0
+  because valid has been low ≥ 1 cycle (FLUSH is 2N+1 cycles). This is
+  now a ws_pe CONTRACT, enforced by a sim-only tripwire (same hazard
+  class as the OS bank-landing tripwire): valid activity during
+  load_mode is a $error.
+- The gate is a mux AFTER the multiply, not on the operand: `0 * X`
+  is X in 4-state simulation (w_reg is X before the first capture) and
+  would corrupt the first LOAD in sim; the chosen form is X-safe and
+  maps to the DSP48 MREG's synchronous reset (RSTM = !valid).
+
+**Prediction before re-synth:** DSP = 16 (fully fused: MREG = product
+with RSTM, PREG = sum_reg, b_in on C, static OPMODE), LUT back down to
+~145–200, CARRY8 ≈ 0, FF back near ~40 as sum_reg reabsorbs into P
+registers. If DSP = 16 but LUT/FF stay at iteration-2 levels, the C-port
+add still isn't packing and the next suspect is the b_in fan-in
+(sum_reg also feeds the w_capture byte mux).
 
 *(Measured: pending human re-synth — fill in here.)*
 
