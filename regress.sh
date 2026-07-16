@@ -38,6 +38,8 @@ run_tb tb_tiling_engine  rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
 
 # --- WS (weight-stationary) variant - parallel build, OS stays intact ---
 run_tb tb_ws_pe          rtl/ws_pe.sv tb/tb_ws_pe.sv
+run_tb tb_ws_array       rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
+                         tb/tb_ws_array.sv
 run_tb tb_ws_controller  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
                          tb/tb_ws_controller.sv
