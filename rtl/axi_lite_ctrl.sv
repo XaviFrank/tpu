@@ -5,6 +5,12 @@
 // pulse_sync, busy via sync_2ff, done edge detected in the core
 // domain and crossed via pulse_sync.
 //
+// HOST CONTRACT: busy and done cross on independent synchronizer
+// paths from the same core-domain event, so STATUS may transiently
+// read busy=1,done=1 for ~1 aclk while a falling busy is still in
+// flight. done is sticky and cleared only by the next go write -
+// hosts poll done alone, never the combination (!busy && done).
+//
 // Register map (spec section 3 contract; rest lands in step 4):
 //   0x00 CTRL    W  [0] go - self-clearing pulse, also clears done
 //   0x04 STATUS  R  [0] busy, [1] done (sticky; set when busy falls)
@@ -37,7 +43,7 @@ module axi_lite_ctrl (
     output logic [31:0] s_axi_rdata,
     output logic [1:0]  s_axi_rresp,
 
-    // core-domain side (v1: tie core_clk to s_axi_aclk externally)
+    // core-domain side (asynchronous to s_axi_aclk)
     input  logic        core_clk,
     input  logic        core_rst_n,
     output logic        core_go,
