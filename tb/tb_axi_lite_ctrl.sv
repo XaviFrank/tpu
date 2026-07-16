@@ -1,8 +1,8 @@
 `timescale 1ns / 1ps
 //====================================================================
 // tb_axi_lite_ctrl v1 (spec step 2): protocol + CTRL/STATUS checks
-// against a FAKE core (busy modeled in the TB), single shared clock
-// (core_clk tied to aclk until the CDC step).
+// against a FAKE core (busy modeled in the TB), aclk 100 MHz vs
+// jittered ~263 MHz cclk, asynchronous.
 //   P1: STATUS reads 0 after reset; unmapped address reads 0
 //   P2: go write -> exactly one core_go pulse, busy then done seen
 //       through STATUS polling
@@ -37,6 +37,19 @@ module tb_axi_lite_ctrl;
     int go_seen = 0;
     int go_base = 0;
 
+    // Core clock: ~263 MHz average with random per-half-cycle jitter,
+    // so the aclk/cclk phase relationship is genuinely asynchronous
+    // and sweeps through all alignments across the run (CDC bugs that
+    // pass at one fixed alignment fail at another - spec section 5)
+    logic cclk = 1'b0;
+    logic crst_n;
+
+    initial begin
+        forever begin
+            #(1.7 + $urandom_range(0, 400)/1000.0) cclk = ~cclk;
+        end
+    end
+
     axi_lite_ctrl dut (
         .s_axi_aclk    (aclk),
         .s_axi_aresetn (aresetn),
@@ -57,8 +70,8 @@ module tb_axi_lite_ctrl;
         .s_axi_rready  (rready),
         .s_axi_rdata   (rdata),
         .s_axi_rresp   (rresp),
-        .core_clk      (aclk),        // v1: single shared clock
-        .core_rst_n    (aresetn),
+        .core_clk      (cclk),
+        .core_rst_n    (crst_n),
         .core_go       (core_go),
         .core_busy     (core_busy)
     );
@@ -71,15 +84,15 @@ module tb_axi_lite_ctrl;
     // a pulse and holds 40 (long enough that STATUS polling over AXI
     // always observes it, even once the core clock is asynchronous)
     //----------------------------------------------------------------
-    always @(posedge aclk)
+    always @(posedge cclk)
         if (aresetn && core_go === 1'b1) go_seen = go_seen + 1;
 
     initial core_busy = 1'b0;
-    always @(posedge aclk) begin
+    always @(posedge cclk) begin
         if (aresetn && core_go === 1'b1) begin
-            repeat (2) @(negedge aclk);
+            repeat (2) @(negedge cclk);
             core_busy = 1'b1;
-            repeat (40) @(negedge aclk);
+            repeat (40) @(negedge cclk);
             core_busy = 1'b0;
         end
     end
@@ -196,12 +209,13 @@ module tb_axi_lite_ctrl;
     logic [31:0] rd;
 
     initial begin
-        aresetn = 0;
+        aresetn = 0; crst_n = 0;
         awvalid = 0; awaddr = '0; wvalid = 0; wdata = '0; wstrb = 4'hF;
         bready = 0; arvalid = 0; araddr = '0; rready = 0;
 
         repeat (3) @(negedge aclk);
         aresetn = 1;
+        crst_n  = 1;
         repeat (2) @(negedge aclk);
 
         //--- P1: STATUS and unmapped addresses read 0 after reset -----
@@ -214,51 +228,55 @@ module tb_axi_lite_ctrl;
             errors++; $error("[P1] unmapped 0x18 = %h, expected 0", rd);
         end else $display("PASS [P1] unmapped address reads 0");
 
-        //--- P2: go -> one pulse, busy, done ---------------------------
-        go_base = go_seen;
-        axi_write(ADDR_CTRL, 32'h1);
-        repeat (10) @(negedge aclk);
-        if (go_seen - go_base !== 1) begin
-            errors++;
-            $error("[P2] core_go pulses = %0d, expected 1", go_seen - go_base);
-        end
-        poll_status_bit(0, "P2 busy");
-        poll_status_bit(1, "P2 done");
-        axi_read(ADDR_STATUS, rd);
-        if (rd[0] !== 1'b0) begin
-            errors++; $error("[P2] busy still set after done");
-        end else $display("PASS [P2] go -> one pulse -> busy -> done");
+        for (int it = 0; it < 3; it++) begin
+            $display("--- async iteration %0d ---", it);
 
-        //--- P3: staggered channel ordering, no stray go ---------------
-        go_base = go_seen;
-        axi_write_aw_first(ADDR_CTRL, 32'h0);
-        axi_write_w_first(ADDR_CTRL, 32'h0);
-        repeat (10) @(negedge aclk);
-        if (go_seen - go_base !== 0) begin
-            errors++;
-            $error("[P3] stray go pulse (delta=%0d)", go_seen - go_base);
-        end else $display("PASS [P3] staggered AW/W writes, no stray go");
+            //--- P2: go -> one pulse, busy, done ---------------------------
+            go_base = go_seen;
+            axi_write(ADDR_CTRL, 32'h1);
+            repeat (10) @(negedge aclk);
+            if (go_seen - go_base !== 1) begin
+                errors++;
+                $error("[P2] core_go pulses = %0d, expected 1", go_seen - go_base);
+            end
+            poll_status_bit(0, "P2 busy");
+            poll_status_bit(1, "P2 done");
+            axi_read(ADDR_STATUS, rd);
+            if (rd[0] !== 1'b0) begin
+                errors++; $error("[P2] busy still set after done");
+            end else $display("PASS [P2] go -> one pulse -> busy -> done");
 
-        //--- P4: delayed RREADY (done still set from P2) ---------------
-        axi_read_slow(ADDR_STATUS, rd);
-        if (rd[1] !== 1'b1) begin
-            errors++; $error("[P4] STATUS.done lost during held read");
-        end else $display("PASS [P4] rvalid/rdata held until rready");
+            //--- P3: staggered channel ordering, no stray go ---------------
+            go_base = go_seen;
+            axi_write_aw_first(ADDR_CTRL, 32'h0);
+            axi_write_w_first(ADDR_CTRL, 32'h0);
+            repeat (10) @(negedge aclk);
+            if (go_seen - go_base !== 0) begin
+                errors++;
+                $error("[P3] stray go pulse (delta=%0d)", go_seen - go_base);
+            end else $display("PASS [P3] staggered AW/W writes, no stray go");
 
-        //--- P5: second go - done clears then re-sets ------------------
-        go_base = go_seen;
-        axi_write(ADDR_CTRL, 32'h1);
-        axi_read(ADDR_STATUS, rd);
-        if (rd[1] !== 1'b0) begin
-            errors++; $error("[P5] done not cleared by go write");
+            //--- P4: delayed RREADY (done still set from P2) ---------------
+            axi_read_slow(ADDR_STATUS, rd);
+            if (rd[1] !== 1'b1) begin
+                errors++; $error("[P4] STATUS.done lost during held read");
+            end else $display("PASS [P4] rvalid/rdata held until rready");
+
+            //--- P5: second go - done clears then re-sets ------------------
+            go_base = go_seen;
+            axi_write(ADDR_CTRL, 32'h1);
+            axi_read(ADDR_STATUS, rd);
+            if (rd[1] !== 1'b0) begin
+                errors++; $error("[P5] done not cleared by go write");
+            end
+            repeat (10) @(negedge aclk);
+            if (go_seen - go_base !== 1) begin
+                errors++;
+                $error("[P5] core_go pulses = %0d, expected 1", go_seen - go_base);
+            end
+            poll_status_bit(1, "P5 done again");
+            $display("PASS [P5] done cleared by go and re-set");
         end
-        repeat (10) @(negedge aclk);
-        if (go_seen - go_base !== 1) begin
-            errors++;
-            $error("[P5] core_go pulses = %0d, expected 1", go_seen - go_base);
-        end
-        poll_status_bit(1, "P5 done again");
-        $display("PASS [P5] done cleared by go and re-set");
 
         //--- summary ----------------------------------------------------
         repeat (2) @(negedge aclk);

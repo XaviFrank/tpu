@@ -1,9 +1,9 @@
 `timescale 1ns / 1ps
 //====================================================================
-// axi_lite_ctrl v1 (AXI spec step 2): AXI-Lite control/status
-// skeleton, CTRL/STATUS only, SINGLE SHARED CLOCK assumption -
-// core_clk must be tied to s_axi_aclk until the CDC step lands (the
-// port split exists so that step only touches internals).
+// axi_lite_ctrl v2 (AXI spec step 3): AXI-Lite control/status
+// skeleton, CTRL/STATUS only. TWO ASYNCHRONOUS DOMAINS: go via
+// pulse_sync, busy via sync_2ff, done edge detected in the core
+// domain and crossed via pulse_sync.
 //
 // Register map (spec section 3 contract; rest lands in step 4):
 //   0x00 CTRL    W  [0] go - self-clearing pulse, also clears done
@@ -68,10 +68,7 @@ module axi_lite_ctrl (
             aw_got       <= 1'b0;
             w_got        <= 1'b0;
             s_axi_bvalid <= 1'b0;
-            core_go      <= 1'b0;
         end else begin
-            core_go <= go_write;      // v1 only: same-clock 1-cycle pulse
-
             if (s_axi_awvalid && s_axi_awready) begin
                 waddr_q <= s_axi_awaddr[5:2];
                 aw_got  <= 1'b1;
@@ -91,22 +88,73 @@ module axi_lite_ctrl (
     end
 
     //----------------------------------------------------------------
-    // done: sticky on busy falling edge, cleared by a go write
-    // (v1 only: busy edge detected on the AXI clock)
+    // CDC: go pulse into the core domain
     //----------------------------------------------------------------
-    logic busy_q, done_ff;
+    logic go_pulse_axi;
 
     always_ff @(posedge s_axi_aclk or negedge s_axi_aresetn) begin
-        if (!s_axi_aresetn) begin
-            busy_q  <= 1'b0;
+        if (!s_axi_aresetn)
+            go_pulse_axi <= 1'b0;
+        else
+            go_pulse_axi <= go_write;
+    end
+
+    pulse_sync u_cdc_go (
+        .src_clk   (s_axi_aclk),
+        .src_rst_n (s_axi_aresetn),
+        .src_pulse (go_pulse_axi),
+        .dst_clk   (core_clk),
+        .dst_rst_n (core_rst_n),
+        .dst_pulse (core_go)
+    );
+
+    //----------------------------------------------------------------
+    // CDC: busy level into the AXI domain
+    //----------------------------------------------------------------
+    logic busy_axi;
+
+    sync_2ff u_cdc_busy (
+        .clk   (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .d     (core_busy),
+        .q     (busy_axi)
+    );
+
+    //----------------------------------------------------------------
+    // done: busy falling edge detected in the CORE domain (exact),
+    // crossed as a pulse, sticky in the AXI domain until a go write
+    //----------------------------------------------------------------
+    logic core_busy_q;
+    logic done_pulse_axi;
+
+    always_ff @(posedge core_clk or negedge core_rst_n) begin
+        if (!core_rst_n)
+            core_busy_q <= 1'b0;
+        else
+            core_busy_q <= core_busy;
+    end
+
+    logic core_done_pulse;
+    assign core_done_pulse = core_busy_q && !core_busy;
+
+    pulse_sync u_cdc_done (
+        .src_clk   (core_clk),
+        .src_rst_n (core_rst_n),
+        .src_pulse (core_done_pulse),
+        .dst_clk   (s_axi_aclk),
+        .dst_rst_n (s_axi_aresetn),
+        .dst_pulse (done_pulse_axi)
+    );
+
+    logic done_ff;
+
+    always_ff @(posedge s_axi_aclk or negedge s_axi_aresetn) begin
+        if (!s_axi_aresetn)
             done_ff <= 1'b0;
-        end else begin
-            busy_q <= core_busy;
-            if (go_write)
-                done_ff <= 1'b0;
-            else if (busy_q && !core_busy)
-                done_ff <= 1'b1;
-        end
+        else if (go_write)
+            done_ff <= 1'b0;
+        else if (done_pulse_axi)
+            done_ff <= 1'b1;
     end
 
     //----------------------------------------------------------------
@@ -123,7 +171,7 @@ module axi_lite_ctrl (
             if (s_axi_arvalid && s_axi_arready) begin
                 s_axi_rvalid <= 1'b1;
                 case (s_axi_araddr[5:2])
-                    A_STATUS: s_axi_rdata <= {30'b0, done_ff, core_busy};
+                    A_STATUS: s_axi_rdata <= {30'b0, done_ff, busy_axi};
                     default:  s_axi_rdata <= '0;
                 endcase
             end else if (s_axi_rvalid && s_axi_rready) begin
