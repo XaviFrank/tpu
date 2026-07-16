@@ -34,6 +34,11 @@ module ws_unit #(
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
 
+    // perf counter access (ws_perf_counters map - see that module)
+    input  logic                          perf_clear,
+    input  logic [3:0]                    perf_addr,
+    output logic [31:0]                   perf_data,
+
     // raw write ports (one word = N packed int8s, element 0 in [7:0])
     input  logic                          wr_en_w,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_w,
@@ -58,6 +63,9 @@ module ws_unit #(
     logic                         load_mode, w_capture, valid_feed;
     logic signed [DATA_WIDTH-1:0] a_feed [N];
     logic signed [ACC_WIDTH-1:0]  b_top  [N];
+
+    // perf Moore flags
+    logic                         in_stream, in_flush, in_idle;
 
     // skewed activation streams
     logic                         v_skewed [N];
@@ -105,6 +113,9 @@ module ws_unit #(
         .a_base     (a_base),
         .n_vecs     (n_vecs),
         .busy       (busy),
+        .in_stream  (in_stream),
+        .in_flush   (in_flush),
+        .in_idle    (in_idle),
         .rd_en_w    (rd_en_w),
         .rd_addr_w  (rd_addr_w),
         .rd_data_w  (rd_data_w),
@@ -116,6 +127,19 @@ module ws_unit #(
         .valid_feed (valid_feed),
         .a_feed     (a_feed),
         .b_top      (b_top)
+    );
+
+    ws_perf_counters u_perf (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .perf_clear (perf_clear),
+        .in_load    (load_mode),
+        .in_stream  (in_stream),
+        .in_flush   (in_flush),
+        .in_idle    (in_idle),
+        .tile_swap  (w_capture),
+        .perf_addr  (perf_addr),
+        .perf_data  (perf_data)
     );
 
     input_skew #(.N(N), .DATA_WIDTH(DATA_WIDTH)) u_skew_a (

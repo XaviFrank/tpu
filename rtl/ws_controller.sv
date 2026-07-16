@@ -59,6 +59,11 @@ module ws_controller #(
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
 
+    // perf Moore flags (in_load is load_mode; tile strobe is w_capture)
+    output logic                          in_stream,
+    output logic                          in_flush,
+    output logic                          in_idle,
+
     // weight-buffer read port (rd_data valid 1 cycle after rd_en)
     output logic                          rd_en_w,
     output logic [$clog2(DEPTH)-1:0]      rd_addr_w,
@@ -189,6 +194,9 @@ module ws_controller #(
     // Outputs (Moore: pure functions of state + counters)
     //----------------------------------------------------------------
     assign busy       = (state != W_IDLE);
+    assign in_stream  = (state == W_STREAM);
+    assign in_flush   = (state == W_FLUSH);
+    assign in_idle    = (state == W_IDLE);
     assign load_mode  = (state == W_LOAD);
     assign w_capture  = (state == W_LOAD) && (load_cnt == LOAD_CYCLES-1);
     assign valid_feed = (state == W_STREAM) && land_a;

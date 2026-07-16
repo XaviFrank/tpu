@@ -37,6 +37,11 @@ module ws_quant_unit #(
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
 
+    // perf counter access (pass-through to ws_unit)
+    input  logic                          perf_clear,
+    input  logic [3:0]                    perf_addr,
+    output logic [31:0]                   perf_data,
+
     // raw write ports (pass-through)
     input  logic                          wr_en_w,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_w,
@@ -70,6 +75,9 @@ module ws_quant_unit #(
         .a_base     (a_base),
         .n_vecs     (n_vecs),
         .busy       (busy),
+        .perf_clear (perf_clear),
+        .perf_addr  (perf_addr),
+        .perf_data  (perf_data),
         .wr_en_w    (wr_en_w),
         .wr_addr_w  (wr_addr_w),
         .wr_data_w  (wr_data_w),

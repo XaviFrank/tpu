@@ -42,6 +42,7 @@ run_tb tb_ws_array       rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          tb/tb_ws_array.sv
 run_tb tb_ws_controller  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          tb/tb_ws_controller.sv
 
 # --- requant/ReLU (shared INT32->INT8 core; vectors from gen_requant_vectors.py) ---
@@ -52,11 +53,13 @@ run_tb tb_quant_engine   rtl/mac_unit.sv rtl/os_pe.sv rtl/systolic_array.sv \
                          rtl/requant.sv rtl/quant_engine.sv tb/tb_quant_engine.sv
 run_tb tb_ws_quant_unit  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv tb/tb_ws_quant_unit.sv
 
 # --- N=16 scaling checkpoint (same WS RTL, larger parameterization) ---
 run_tb tb_ws_n16         rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv tb/tb_ws_n16.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }

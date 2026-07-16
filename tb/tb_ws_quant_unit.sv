@@ -41,6 +41,9 @@ module tb_ws_quant_unit;
     logic                        relu_en;
     logic signed [15:0]          scale_mult;
     logic [4:0]                  shift_amt;
+    logic        perf_clear;
+    logic [3:0]  perf_addr;
+    logic [31:0] perf_data;
 
     int errors = 0;
 
@@ -55,6 +58,9 @@ module tb_ws_quant_unit;
         .a_base     (a_base),
         .n_vecs     (n_vecs),
         .busy       (busy),
+        .perf_clear (perf_clear),
+        .perf_addr  (perf_addr),
+        .perf_data  (perf_data),
         .wr_en_w    (wr_en_w),
         .wr_addr_w  (wr_addr_w),
         .wr_data_w  (wr_data_w),
@@ -198,6 +204,7 @@ module tb_ws_quant_unit;
         wr_en_w = 0; wr_addr_w = '0; wr_data_w = '0;
         wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
         relu_en = 0; scale_mult = 16'sd1; shift_amt = '0;   // identity quant
+        perf_clear = 0; perf_addr = '0;
 
         // weights: row magnitudes force clipping in some columns,
         // row 2 small so some outputs stay in range

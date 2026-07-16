@@ -45,6 +45,10 @@ module tb_ws_controller;
     logic signed [ACC_WIDTH-1:0] sum_out [N];
     logic                        sum_valid [N];
 
+    logic        perf_clear;
+    logic [3:0]  perf_addr;
+    logic [31:0] perf_data;
+
     int errors = 0;
 
     ws_unit #(
@@ -65,7 +69,10 @@ module tb_ws_controller;
         .wr_addr_a  (wr_addr_a),
         .wr_data_a  (wr_data_a),
         .sum_out    (sum_out),
-        .sum_valid  (sum_valid)
+        .sum_valid  (sum_valid),
+        .perf_clear (perf_clear),
+        .perf_addr  (perf_addr),
+        .perf_data  (perf_data)
     );
 
     // 100 MHz clock
@@ -175,12 +182,34 @@ module tb_ws_controller;
     endtask
 
     //----------------------------------------------------------------
+    // Perf-counter read (registered port: data lands one posedge
+    // after perf_addr) and check helper
+    //----------------------------------------------------------------
+    int c_val;
+
+    task automatic read_ctr(input [3:0] idx, output int val);
+        @(negedge clk) perf_addr = idx;
+        @(negedge clk);
+        val = perf_data;
+    endtask
+
+    task automatic check_ctr(input string name, input int got, input int exp);
+        if (got !== exp) begin
+            errors++;
+            $error("[T4 perf] %s = %0d, expected %0d", name, got, exp);
+        end else begin
+            $display("PASS [T4 perf] %s = %0d", name, got);
+        end
+    endtask
+
+    //----------------------------------------------------------------
     // Main sequence
     //----------------------------------------------------------------
     initial begin
         rst_n = 0; go = 0; w_tile_idx = '0; a_base = '0; n_vecs = '0;
         wr_en_w = 0; wr_addr_w = '0; wr_data_w = '0;
         wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
+        perf_clear = 0; perf_addr = '0;
 
         // golden data
         w1[0][0]=2;  w1[0][1]=-1; w1[0][2]=3;  w1[0][3]=0;
@@ -280,6 +309,35 @@ module tb_ws_controller;
             errors++;
             $error("[T3 b2b] %0d result(s) arrived after busy fell", late_results);
         end
+
+        //--- T4: WS perf counters (map: 0 total, 1 load, 2 stream,
+        //        3 flush, 5 idle, 7 tile_swaps; 4/6 unused read 0) ----
+        // clear first: T1-T3 issued 4 gos; after clear + one 1-vec run
+        // tile_swaps == 1 proves both the clear and the strobe count
+        @(negedge clk) perf_clear = 1;
+        @(negedge clk) perf_clear = 0;
+
+        for (int j = 0; j < 4; j++) begin
+            y_exp[j] = 0;
+            for (int i = 0; i < 4; i++)
+                y_exp[j] = y_exp[j] + w1[i][j]*a1[i];
+        end
+        run_and_check(2, 7, 1, "T4 perf run");
+
+        read_ctr(4'd1, c_val);
+        check_ctr("load (N+2)", c_val, N+2);
+        read_ctr(4'd2, c_val);
+        check_ctr("stream (n_vecs+1)", c_val, 2);
+        read_ctr(4'd3, c_val);
+        check_ctr("flush (2N+1)", c_val, 2*N+1);
+        read_ctr(4'd7, c_val);
+        check_ctr("tile_swaps", c_val, 1);
+        read_ctr(4'd4, c_val);
+        check_ctr("unused idx 4", c_val, 0);
+        read_ctr(4'd6, c_val);
+        check_ctr("unused idx 6", c_val, 0);
+        read_ctr(4'd9, c_val);
+        check_ctr("out-of-range idx 9", c_val, 0);
 
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge clk);
