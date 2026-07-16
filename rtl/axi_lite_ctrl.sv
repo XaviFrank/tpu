@@ -137,6 +137,29 @@ module axi_lite_ctrl #(
                 wdata_q <= s_axi_wdata;
                 w_got   <= 1'b1;
             end
+
+            // handshake launches: fire one cycle after the commit that
+            // set dirty (holding registers are stable when sampled);
+            // rewrites during flight relaunch after the ack returns.
+            // Ordered BEFORE the commit block below so that, on a
+            // same-edge coincidence of a launch and a new commit to
+            // the same register, the commit's dirty-set (last
+            // nonblocking assignment in program order) wins over this
+            // block's dirty-clear and the new value relaunches after
+            // the in-flight ack returns.
+            if (nvecs_dirty && !nvecs_hs_busy && !nvecs_send) begin
+                nvecs_send  <= 1'b1;
+                nvecs_dirty <= 1'b0;
+            end
+            if (cfg_dirty && !cfg_hs_busy && !cfg_send) begin
+                cfg_send  <= 1'b1;
+                cfg_dirty <= 1'b0;
+            end
+            if (psel_dirty && !psel_hs_busy && !psel_send) begin
+                psel_send  <= 1'b1;
+                psel_dirty <= 1'b0;
+            end
+
             if (commit) begin
                 case (waddr_q)
                     A_NVECS: begin
@@ -159,22 +182,6 @@ module axi_lite_ctrl #(
             end
             if (s_axi_bvalid && s_axi_bready)
                 s_axi_bvalid <= 1'b0;
-
-            // handshake launches: fire one cycle after the commit that
-            // set dirty (holding registers are stable when sampled);
-            // rewrites during flight relaunch after the ack returns
-            if (nvecs_dirty && !nvecs_hs_busy && !nvecs_send) begin
-                nvecs_send  <= 1'b1;
-                nvecs_dirty <= 1'b0;
-            end
-            if (cfg_dirty && !cfg_hs_busy && !cfg_send) begin
-                cfg_send  <= 1'b1;
-                cfg_dirty <= 1'b0;
-            end
-            if (psel_dirty && !psel_hs_busy && !psel_send) begin
-                psel_send  <= 1'b1;
-                psel_dirty <= 1'b0;
-            end
         end
     end
 

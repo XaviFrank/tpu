@@ -50,10 +50,21 @@ module tb_axi_lite_ctrl;
     logic aclk = 1'b0;
     logic cclk = 1'b0;
     logic aresetn, crst_n;
+    int unsigned cclk_seed;
+    int unsigned cclk_seed_dummy;
 
     always #5 aclk = ~aclk;    // 100 MHz AXI clock
 
     initial begin
+        // default seed keeps regressions reproducible; pass +SEED=<n>
+        // to vvp to sweep a different phase trajectory.
+        if (!$value$plusargs("SEED=%d", cclk_seed)) cclk_seed = 32'd1;
+        // Icarus quirk: $urandom(seed) treats seed as inout and
+        // overwrites cclk_seed with post-reseed RNG state, so the
+        // seed must be displayed BEFORE the reseed call (jitter
+        // determinism per input seed is unaffected either way).
+        $display("cclk jitter seed = %0d", cclk_seed);
+        cclk_seed_dummy = $urandom(cclk_seed);
         forever begin
             #(1.7 + $urandom_range(0, 400)/1000.0) cclk = ~cclk;
         end
@@ -401,8 +412,8 @@ module tb_axi_lite_ctrl;
 
         if (check_busy != 0) begin
             // busy_axi is visible ~4 aclk after the go commit; a
-            // 15-vec run holds busy ~31 cclk (~118 ns = ~12 aclk):
-            // sampling ~7-9 aclk after the commit lands mid-window
+            // 15-vec run holds busy ~31 cclk (~118 ns = ~12 aclk wide):
+            // sampling ~5-6 aclk after the commit lands mid-window
             repeat (2) @(negedge aclk);
             axi_read(ADDR_STATUS, st);
             if (st[0] !== 1'b1) begin

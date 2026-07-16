@@ -10,6 +10,12 @@
 //   ignores src_send while src_busy, i.e. until the ack returns).
 //   Round trip is ~3 dst + ~3 src cycles; callers queue re-sends
 //   behind src_busy (see axi_lite_ctrl's dirty-flag pattern).
+//
+// RESET REQUIREMENT: both domains' resets must be asserted/released
+// together (one reset controller). A one-sided reset can strand
+// req_t/ack_t on opposite phases, wedging src_busy at 1 and
+// permanently blocking the channel. This design assumes the SoC
+// sequences both resets; there is deliberately no self-recovery.
 //====================================================================
 module bus_handshake #(
     parameter int W = 32
