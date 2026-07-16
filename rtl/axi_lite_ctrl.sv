@@ -9,6 +9,18 @@
 // flight. done is sticky and cleared only by the next go write -
 // hosts poll done alone, never the combination (!busy && done).
 //
+// - After writing N_VECS or REQUANT_CFG, allow the crossing to
+//   settle (~6 aclk + ~6 core clks; a rewrite while a handshake is
+//   in flight defers delivery by another round trip) before writing
+//   go. Back-to-back config-then-go can run with stale config.
+// - A go written while busy is DROPPED by the core (accepted only
+//   when idle) but still clears done here - so the current run's
+//   completion would re-set done and look like the dropped command
+//   finished. Poll done before re-arming go.
+// - go/done pulse spacing relies on AXI transaction pacing and
+//   assumes core_clk is not slower than ~aclk/3 (see pulse_sync).
+// - wstrb is accepted but ignored: full-word 32-bit writes only.
+//
 // Register map (byte offsets; word decode on addr[5:2]):
 //   0x00 CTRL        W  [0] go - self-clearing pulse, clears done
 //   0x04 STATUS      R  [0] busy (sync_2ff), [1] done (sticky)
@@ -17,8 +29,9 @@
 //                       [21] relu_en (22 bits - one register)
 //   0x10 PERF_SEL    W  [3:0] counter index; readback supported
 //   0x14 PERF_DATA   R  selected counter, refreshed once per PERF_SEL
-//                       write (bounded ~4 aclk + ~6 core clks later -
-//                       hosts write PERF_SEL, wait, then read)
+//                       write (round trip ~4-6 aclk + ~6 core clks;
+//                       hosts should budget 20 aclk - hosts write
+//                       PERF_SEL, wait, then read)
 //
 // CDC per signal class (spec section 2): go/done pulse_sync, busy
 // sync_2ff, every multi-bit value bus_handshake (req/ack, source

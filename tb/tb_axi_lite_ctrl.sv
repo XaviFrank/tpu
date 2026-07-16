@@ -40,7 +40,8 @@ module tb_axi_lite_ctrl;
     localparam [5:0] ADDR_PDATA  = 6'h14;
 
     localparam int POLL_MAX = 50;
-    // crossing-settle waits (generous vs the ~6 aclk + ~6 cclk actual)
+    // crossing-settle waits (round trip ~4-6 aclk + ~6 cclk actual;
+    // 20 aclk budget per the axi_lite_ctrl HOST CONTRACT)
     localparam int CFG_SETTLE_ACLKS  = 20;
     localparam int PERF_SETTLE_ACLKS = 20;
 
