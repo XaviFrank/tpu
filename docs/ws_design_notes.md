@@ -68,31 +68,47 @@ Per-tile swap overhead is **FLUSH 9 + LOAD 6 = 15 cycles**, independent of
 `n_vecs` — amortized by streaming more vectors per resident tile, which is
 the batching story (out of scope here).
 
-## Synthesis: DSP48 inference (bug found post-merge)
+## Synthesis: DSP48 inference (bug iterations, post-merge)
+
+### Iteration 1: 0 DSPs → missing use_dsp attribute
 
 First `ws_unit` synth came back **0 DSP**, `u_array` = 1176 LUT / 784 FF /
 176 CARRY8 (~73 LUT/PE) — all arithmetic in fabric. Root cause: `ws_pe`
 was missing the `(* use_dsp = "yes" *)` attribute that `mac_unit` carries
-(its header: "necessary to cut down on LUTs"). Structural checks came back
-clean against the working OS reference: datapath regs unreset (same
-split), mode mux in the same always block as the arithmetic (same shape as
-mac_unit's clear/drain/accumulate mux, which infers fine WITH the
-attribute). Vivado's default heuristic simply leaves 8×8 multiplies in LUT
-fabric — the same natural cause as the Phase 2 OS incident; the attribute
-is the established fix, not a paper-over. Applied at MODULE scope (as in
-mac_unit), not on `product` alone, so the `b_in + product` post-add folds
-into the DSP48's post-adder rather than only the multiply.
+(its header: "necessary to cut down on LUTs"). Structural hypotheses
+eliminated against the working OS reference first: datapath regs unreset
+(same split), mode mux in the same always block as the arithmetic (same
+shape as mac_unit's clear/drain/accumulate mux). Vivado's default
+heuristic leaves 8×8 multiplies in LUT fabric — same natural cause as the
+Phase 2 OS incident. Applied at module scope (commit c0f0a23).
 
-**Prediction before re-synth (N=4):**
-- DSPs: **16** (1 per PE — M-reg = `product`, P-reg = `sum_reg`,
-  C-port = `b_in`; the LOAD/idle passthrough should map to OPMODE
-  selection, i.e. P = C vs P = C + M)
-- `u_array` LUTs: collapse from 1176 to a small residual (w_capture byte
-  mux + whatever of the mode select doesn't fold into OPMODE). Not
-  necessarily OS's 17 — the WS vertical path is 32-bit — but well under
-  ~200. CARRY8 ≈ 0.
-- Partial-fix signature to watch for (per the bug report): DSP = 16 but
-  LUTs still ~1000 ⇒ multiply folded, post-add didn't.
+**Prediction:** 16 DSP, LUT well under ~200, CARRY8 ≈ 0.
+**Measured:** LUT 145 / FF 40 held, but **DSP = 32 (2/PE)** — module
+scope forced the 32-bit add into a second DSP48 ALU instead of fusing.
+
+### Iteration 2: 32 DSPs → attribute rescoped to the multiplier signal
+
+Register-by-register diff against mac_unit found the template difference:
+
+- mac_unit (fuses): runtime select on the **Z mux** —
+  `acc <= drain_in` (P = C) vs `acc <= acc + product` (P = P + M),
+  X/Y constant. This is Xilinx's documented loadable-MACC inference
+  template.
+- ws_pe: runtime select on the **X/Y side** —
+  `sum_reg <= b_in` (P = C) vs `sum_reg <= b_in + product` (P = C + M),
+  Z constant. Inverse of the recognized template.
+
+Fix attempt (one variable): `use_dsp` moved from module scope to the
+`product` signal only, so only the multiply is forced into a DSP and the
+post-add is left to Vivado's own fusion/packing.
+
+**Prediction before re-synth:** DSP = 16, LUT stays ≤ ~145.
+**Discriminator:** if DSP = 16 but LUT *rises* by roughly a 32-bit
+adder+mux per PE (several hundred total), fusion is still blocked — the
+X/Y-side mode select is the real cause, and the queued next change is to
+make stage 2 unconditional by gating the product operand at stage 1
+(`product <= (valid gate ? a : 0) * w_reg`-style), which restores the
+pure static `P = C + M` shape at the cost of a small per-PE operand mux.
 
 *(Measured: pending human re-synth — fill in here.)*
 

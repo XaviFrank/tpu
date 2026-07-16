@@ -27,12 +27,14 @@
 //     tiles transposed to get y = W*a.
 //   Reset style: control regs (valids) async reset; datapath regs
 //   (w_reg, sum_reg, product, a_out) unreset - valid gates them.
-//   use_dsp: same necessity as mac_unit (see its header) - Vivado's
-//   default heuristic leaves 8x8 multiplies in LUT fabric; module
-//   scope so the b_in + product post-add folds into the DSP48 too,
-//   not just the multiply.
+//   use_dsp: scoped to the PRODUCT signal only (2-DSP/PE bug,
+//   docs/ws_design_notes.md): module scope forced the 32-bit
+//   sum_reg add into a second DSP48 ALU instead of letting it fuse
+//   as the multiply-DSP's post-add. Note ws_pe's mode select is on
+//   the X/Y side (M vs 0, C constant) - the inverse of mac_unit's
+//   Z-side loadable-MACC template (P vs C) - which is the suspect
+//   if fusion still fails with the narrowed scope.
 //====================================================================
-(* use_dsp = "yes" *) // necessary to cut down on LUTs (as mac_unit)
 module ws_pe #(
     parameter DATA_WIDTH = 8,
     parameter ACC_WIDTH  = 32
@@ -53,6 +55,7 @@ module ws_pe #(
 
     logic signed [DATA_WIDTH-1:0]   w_reg;
     logic signed [ACC_WIDTH-1:0]    sum_reg;
+    (* use_dsp = "yes" *)                            // multiplier only - see header
     logic signed [2*DATA_WIDTH-1:0] product;
     logic                           valid_pipe;
 
