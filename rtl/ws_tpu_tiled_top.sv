@@ -13,13 +13,18 @@
 //   ws_quant_unit q8_out/q8_valid streams exposed below fire on
 //   EVERY inner tile and are NOT authoritative - q8 requantizes
 //   per-tile partial sums. Only the engine's res_* stream carries
-//   final results. Program K_TILES/N_TILES/N_VECS/REQUANT_CFG (all
+//   final results (core-domain streaming port, no AXI-Lite readback
+//   path; results collected by TB now, DMA/AXI-HP later, never via
+//   register map). Program K_TILES/N_TILES/N_VECS/REQUANT_CFG (all
 //   settle-before-go), write go, poll done; if done never arrives
 //   check STATUS[2] (cfg_err - the go was rejected).
 //
 //   Data layout (loader contract; TB now, DMA later): weight tile
 //   (n_tile, k_tile) at buffer tile index n_tile*K_TILES + k_tile;
 //   activation chunk k_tile at words k_tile*n_vecs .. +n_vecs-1.
+//   K_total/N_total must be MULTIPLES OF THE ARRAY SIZE (N): ragged
+//   sizes are out of scope - the loader zero-pads, same as the OS
+//   tiling engine's contract.
 //
 //   Single parameter set feeds all three instances (coupling is
 //   structural); the guards below fail the build if the register-map

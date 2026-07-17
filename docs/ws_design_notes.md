@@ -194,3 +194,4 @@ flag before implementing.
 - Activation word: lane `i` feeds array row `i`; one word = one vector.
 - Column outputs are skewed (column j lags column 0 by j cycles) and exit
   continuously, gated by `sum_valid` — no drain. Consumers deskew.
+- Tiled operation (ws_tiling_engine / ws_tpu_tiled_top): K_total/N_total are multiples of the array size N only — ragged sizes are the loader's zero-padding responsibility. Weight tile (n_tile, k_tile) lives at buffer tile index n_tile*K_TILES + k_tile; activation chunk k at words k*n_vecs..+n_vecs-1. Final results come ONLY from the engine's res_* stream (v-outer/j-inner per N-tile); ws_quant_unit's own q8 stream requantizes per-tile partials and is not authoritative when K_TILES > 1.

@@ -50,8 +50,9 @@
 // in flight is re-sent when the ack returns, so the core converges
 // on the latest value and never observes a torn one.
 //
-// Single-tile scope: w_tile_idx/a_base have no registers (spec map);
-// the integration ties them to 0. First extension for WS tiling.
+// w_tile_idx/a_base have no registers (spec map); the single-tile
+// integration (ws_tpu_top) ties them to 0, and ws_tpu_tiled_top's
+// tiling engine drives them.
 // Control plane only - zero DSPs expected in synth (a DSP here is a
 // bug signal). Weight/activation data movement is NOT here (AXI-HP/
 // DMA, separate work).

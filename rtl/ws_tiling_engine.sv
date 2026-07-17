@@ -17,11 +17,19 @@
 //   Accumulator: N banks x MAX_N_VECS x ACC_WIDTH, accumulate-on-
 //   write (k_tile 0 overwrites, later k-tiles add). Banks and their
 //   adders are fabric (0 DSPs expected on sequencing/accumulate).
+//   Overflow argument: the capacity guard bounds total K at DEPTH
+//   rows, so |acc| <= DEPTH * 127 * 127 < 2^21 - INT32 banks cannot
+//   overflow at any accepted configuration. Revisit if DEPTH grows
+//   past ~2^16 or ACC_WIDTH shrinks.
 //
 //   cfg_err (sticky, cleared by the next ACCEPTED go): a go with
 //   n_vecs == 0, n_vecs > MAX_N_VECS, k_tiles == 0, n_tiles == 0,
 //   k_tiles*n_tiles > DEPTH/K, or k_tiles*n_vecs > DEPTH is REJECTED
 //   - busy never rises. Surfaced as STATUS[2] by axi_lite_ctrl.
+//   Note: at the default MAX_N_VECS=16 with VEC_W=4 the n_vecs >
+//   MAX_N_VECS leg is unreachable (register max is 15); it arms only
+//   when an integration sets MAX_N_VECS below 2^VEC_W - 1. n_vecs=0
+//   is rejected and does NOT mean 2^VEC_W.
 //
 //   HOST CONTRACT (tiling spec section 3): during tiled operation,
 //   ws_quant_unit's own INT8 stream (q8_out/q8_valid) keeps firing

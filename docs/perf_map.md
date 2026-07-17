@@ -20,7 +20,7 @@ Properties:
 - **Width:** 32 bits (`CW` parameter; the map itself is width-agnostic).
 - **Saturating:** counters hold at all-ones, never wrap.
 - **Clear:** `perf_clear` zeroes all counters (that cycle does not count).
-  With tiling_engine's `AUTO_CLEAR=1` (default), an accepted `start` also
+  With the OS tiling_engine's `AUTO_CLEAR=1` (default), an accepted `start` also
   clears, so numbers are per-run; set `AUTO_CLEAR=0` for cumulative counts.
 - **Read protocol:** present `perf_addr`, read `perf_data` one cycle later
   (registered read, same contract as tile_buffer). Out-of-range addresses
@@ -51,3 +51,6 @@ Indices 0/5/7 deliberately match the OS map (total/idle/tile count) so
 host code can share offsets. Counters saturate; out-of-range reads 0.
 No AXI perf_clear bit yet (counters count from core reset; hosts use
 deltas) — first candidate for a CTRL bit when needed.
+
+In ws_tpu_tiled_top, tile_swaps counts INNER gos (K_TILES*N_TILES per
+outer sweep), not outer-level goes.
