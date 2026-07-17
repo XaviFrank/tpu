@@ -11,7 +11,7 @@
 //   F2: 2x2 relu sweep - engine's final tap applies relu (swaps=8)
 //   F3: cfg_err over AXI - K_TILES=0 go is rejected: busy never
 //       rises, STATUS[2] sets, done never arrives
-//   (F4 - K_TILES==1 collapse - lands with tiling spec step 4.)
+//   F4: K_TILES==1 collapse - res_* == inner q8 == untiled 16-row reference; accepted go clears cfg_err.
 // Layout per the loader contract: tile (n,k) at index n*K_TILES+k,
 // activation chunk k at words k*n_vecs..+n_vecs-1.
 //====================================================================
@@ -444,6 +444,40 @@ module tb_ws_tpu_tiled_top;
             errors++;
             $error("[F3] STATUS = %h, expected cfg_err=1 busy=0", rd);
         end else $display("PASS [F3] K_TILES=0 rejected: cfg_err set, busy never rose");
+
+        //--- F4: K_TILES==1 collapse - identical to single-tile path ---
+        // tile (0,0) already sits at index 0 and chunk 0 at words 0..1
+        // (same layout for kt=1); accepted go must also clear cfg_err
+        run_sweep(2, 1, 1, 0, "F4 kt=1 collapse");
+        check_res(2, 1, 16, 0, "F4 kt=1 collapse");
+        perf_check_swaps("F4");
+
+        axi_read(ADDR_STATUS, rd);
+        if (rd[2] !== 1'b0) begin
+            errors++; $error("[F4] cfg_err not cleared by accepted go");
+        end else $display("PASS [F4] accepted go cleared cfg_err");
+
+        // the inner q8 stream (captured from the single inner run) and
+        // the engine's final stream must agree elementwise: kt=1 means
+        // both requantize the same full sums
+        begin
+            int mismatches;
+            mismatches = 0;
+            for (int v = 0; v < 2; v++)
+                for (int j = 0; j < 16; j++) begin
+                    if (q8_cnt[j] !== 2) begin
+                        errors++;
+                        $error("[F4 q8] column %0d: %0d inner results, expected 2", j, q8_cnt[j]);
+                    end else if (q8_last[j][v] !== r_val[v*16 + j]) begin
+                        mismatches = mismatches + 1;
+                        errors++;
+                        $error("[F4 q8] col %0d vec %0d: inner q8 %0d != final res %0d",
+                               j, v, q8_last[j][v], r_val[v*16 + j]);
+                    end
+                end
+            if (mismatches == 0)
+                $display("PASS [F4] kt=1: inner q8 stream == engine res stream (collapse proven)");
+        end
 
         //--- summary ----------------------------------------------------
         repeat (2) @(negedge aclk);
