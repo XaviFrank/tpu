@@ -63,6 +63,13 @@ module tb_ws_tiling_engine;
     logic [5:0]  wr_addr_w, wr_addr_a;
     logic [31:0] wr_data_w, wr_data_a;
 
+    // final-result stream (Task 2)
+    logic                        res_valid;
+    logic signed [OUT_WIDTH-1:0] res_q8;
+    logic [VEC_W-1:0]            res_vec;
+    logic [$clog2(N)-1:0]        res_col;
+    logic [TILE_W-1:0]           res_ntile;
+
     logic        perf_clear;
     logic [3:0]  perf_addr;
     logic [31:0] perf_data;
@@ -91,7 +98,12 @@ module tb_ws_tiling_engine;
         .w_tile_idx   (w_tile_idx),
         .a_base       (a_base),
         .sum_in       (sum_out),
-        .sum_valid_in (sum_valid)
+        .sum_valid_in (sum_valid),
+        .res_valid    (res_valid),
+        .res_q8       (res_q8),
+        .res_vec      (res_vec),
+        .res_col      (res_col),
+        .res_ntile    (res_ntile)
     );
 
     ws_quant_unit #(
@@ -233,6 +245,42 @@ module tb_ws_tiling_engine;
         end
     end
 
+    //----------------------------------------------------------------
+    // Final-result collector (T4) + last-inner-run q8 capture (T5:
+    // the intermediate stream requantizes PER-TILE partials and is
+    // NOT the final answer - prove it, don't just document it)
+    //----------------------------------------------------------------
+    int res_cnt = 0;
+    int r_val [32];
+    int r_v   [32];
+    int r_c   [32];
+    int r_nt  [32];
+
+    always @(posedge clk) begin
+        if (rst_n && res_valid === 1'b1) begin
+            r_val[res_cnt] = res_q8;
+            r_v[res_cnt]   = res_vec;
+            r_c[res_cnt]   = res_col;
+            r_nt[res_cnt]  = res_ntile;
+            res_cnt = res_cnt + 1;
+        end
+    end
+
+    int q8_cnt  [4];
+    int q8_last [4][4];   // [col][vec] of the most recent inner run
+
+    always @(posedge clk) begin
+        if (rst_n) begin
+            if (core_go === 1'b1)
+                for (int j = 0; j < 4; j++) q8_cnt[j] = 0;
+            for (int j = 0; j < 4; j++)
+                if (q8_valid[j] === 1'b1) begin
+                    q8_last[j][q8_cnt[j]] = q8_out[j];
+                    q8_cnt[j] = q8_cnt[j] + 1;
+                end
+        end
+    end
+
     task automatic check_int(input string name, input int got, input int exp);
         if (got !== exp) begin
             errors++;
@@ -360,6 +408,66 @@ module tb_ws_tiling_engine;
             errors++; $error("[T3 clear] cfg_err not cleared by accepted go");
         end else $display("PASS [T3] accepted go clears cfg_err");
         while (busy) @(negedge clk);
+
+        //--- T4: full 2x2 golden through the final requant stream -----
+        // reload all four REAL tiles (T2 zeroed 2/3)
+        for (int n = 0; n < 2; n++)
+            for (int k = 0; k < 2; k++)
+                load_tile(n, k, 2);
+
+        res_cnt = 0;
+        @(negedge clk) begin go = 1; n_vecs = 4'd2; k_tiles = 4'd2; n_tiles = 4'd2; end
+        @(negedge clk) go = 0;
+        while (busy) @(negedge clk);
+        repeat (2) @(negedge clk);
+
+        check_int("T4 res count", res_cnt, 16);
+        begin
+            int idx;
+            idx = 0;
+            for (int nt = 0; nt < 2; nt++)
+                for (int v = 0; v < 2; v++)
+                    for (int j = 0; j < 4; j++) begin
+                        if (r_nt[idx] !== nt || r_v[idx] !== v || r_c[idx] !== j) begin
+                            errors++;
+                            $error("[T4 order] idx %0d = (nt%0d v%0d c%0d), expected (nt%0d v%0d c%0d)",
+                                   idx, r_nt[idx], r_v[idx], r_c[idx], nt, v, j);
+                        end
+                        if (r_val[idx] !== clamp8(full_y(v, nt*4 + j), 0)) begin
+                            errors++;
+                            $error("[T4 value] res(nt%0d v%0d c%0d) = %0d, expected %0d",
+                                   nt, v, j, r_val[idx], clamp8(full_y(v, nt*4 + j), 0));
+                        end
+                        idx = idx + 1;
+                    end
+        end
+        $display("PASS [T4] 2x2 sweep: 16 final results, order + values exact");
+
+        //--- T5: the intermediate q8 stream is NOT the final answer ---
+        // last inner run was tile (n=1, k=1): its q8 = requant of the
+        // k=1 PARTIAL alone. Golden guarantees at least one element
+        // where clamp8(partial) != clamp8(full); check the hardware
+        // agrees on both sides of that difference.
+        begin
+            int diffs;
+            diffs = 0;
+            for (int v = 0; v < 2; v++)
+                for (int j = 0; j < 4; j++) begin
+                    if (q8_last[j][v] !== clamp8(partial(1, v, 4 + j), 0)) begin
+                        errors++;
+                        $error("[T5] intermediate q8[%0d][%0d] = %0d, expected per-tile partial %0d",
+                               j, v, q8_last[j][v], clamp8(partial(1, v, 4 + j), 0));
+                    end
+                    if (clamp8(partial(1, v, 4 + j), 0) != clamp8(full_y(v, 4 + j), 0))
+                        diffs = diffs + 1;
+                end
+            if (diffs == 0) begin
+                errors++;
+                $error("[T5] golden degenerate: no element distinguishes partial from full");
+            end else begin
+                $display("PASS [T5] intermediate stream = per-tile partials (%0d elements differ from final; res_* is the only authoritative output)", diffs);
+            end
+        end
 
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge clk);

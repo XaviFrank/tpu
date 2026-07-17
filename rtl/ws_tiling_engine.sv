@@ -23,9 +23,17 @@
 //   k_tiles*n_tiles > DEPTH/K, or k_tiles*n_vecs > DEPTH is REJECTED
 //   - busy never rises. Surfaced as STATUS[2] by axi_lite_ctrl.
 //
-//   (Step 2 of the tiling spec adds the drain: a third requant tap
-//   fires once per N-tile after its K-sweep completes. Until then
-//   the banks are checked hierarchically by the TB.)
+//   HOST CONTRACT (tiling spec section 3): during tiled operation,
+//   ws_quant_unit's own INT8 stream (q8_out/q8_valid) keeps firing
+//   on every inner tile and requantizes PER-TILE PARTIAL sums - it
+//   is NOT authoritative when K_TILES > 1 and must be ignored by
+//   anything downstream. Only this engine's res_* stream carries
+//   final results (per N-tile: v outer 0..n_vecs-1, j inner
+//   0..N-1, one value per cycle, 2-cycle pipe latency; global
+//   column = res_ntile*N + res_col). For K_TILES == 1 both streams
+//   are numerically correct; res_* remains the single contract.
+//   The final tap is the THIRD instance of the shared requant core
+//   (no fork), fired once per N-tile after its K-sweep completes.
 //====================================================================
 module ws_tiling_engine #(
     parameter int N           = 4,
@@ -64,7 +72,14 @@ module ws_tiling_engine #(
 
     // raw bottom-edge tap (column-skewed, gated by sum_valid_in)
     input  logic signed [ACC_WIDTH-1:0]   sum_in       [N],
-    input  logic                          sum_valid_in [N]
+    input  logic                          sum_valid_in [N],
+
+    // final results (one per (vec, col) per N-tile, after its K-sweep)
+    output logic                          res_valid,
+    output logic signed [OUT_WIDTH-1:0]   res_q8,
+    output logic [VEC_W-1:0]              res_vec,
+    output logic [$clog2(N)-1:0]          res_col,
+    output logic [TILE_W-1:0]             res_ntile
 );
 
     localparam int TW = $clog2(DEPTH/K);
@@ -78,7 +93,9 @@ module ws_tiling_engine #(
         E_GO,      // one cycle: inner go pulse
         E_WAITB,   // wait for core busy to rise (1 cycle after go)
         E_RUN,     // collect valids, wait for core busy to fall
-        E_ADV      // advance k/n counters or finish
+        E_ADV,     // advance k, or enter the drain
+        E_DRAIN,   // walk banks: v outer, j inner, one value/cycle
+        E_FLUSH    // 2 cycles: let the read->requant pipe emit
     } e_state_t;
 
     e_state_t state;
@@ -89,6 +106,11 @@ module ws_tiling_engine #(
     logic [TILE_W-1:0] k_cnt, n_cnt;
     logic [TW-1:0]     t_idx;
     logic [AW-1:0]     a_base_r;
+
+    // drain walk (control: async reset)
+    logic [VEC_W-1:0]        dr_v;
+    logic [$clog2(N)-1:0]    dr_j;
+    logic                    flush_cnt;
 
     // configuration validation (combinational, evaluated at go)
     logic cfg_bad;
@@ -118,6 +140,9 @@ module ws_tiling_engine #(
             t_idx    <= '0;
             a_base_r <= '0;
             cfg_err  <= 1'b0;
+            dr_v     <= '0;
+            dr_j     <= '0;
+            flush_cnt <= 1'b0;
         end else begin
             unique case (state)
                 E_IDLE: begin
@@ -146,7 +171,34 @@ module ws_tiling_engine #(
 
                 E_ADV: begin
                     if (k_cnt == kt_q - 1'b1) begin
-                        // K-sweep complete for this N-tile
+                        dr_v  <= '0;                     // K-sweep done:
+                        dr_j  <= '0;                     // drain this N-tile
+                        state <= E_DRAIN;
+                    end else begin
+                        k_cnt    <= k_cnt + 1'b1;        // next K-tile
+                        t_idx    <= t_idx + 1'b1;
+                        a_base_r <= a_base_r + nv_q;
+                        state    <= E_GO;
+                    end
+                end
+
+                E_DRAIN: begin
+                    if (dr_j == N - 1) begin
+                        dr_j <= '0;
+                        if (dr_v == nv_q - 1'b1) begin
+                            flush_cnt <= 1'b0;
+                            state     <= E_FLUSH;
+                        end else begin
+                            dr_v <= dr_v + 1'b1;
+                        end
+                    end else begin
+                        dr_j <= dr_j + 1'b1;
+                    end
+                end
+
+                E_FLUSH: begin
+                    flush_cnt <= 1'b1;
+                    if (flush_cnt) begin
                         if (n_cnt == nt_q - 1'b1) begin
                             state <= E_IDLE;             // sweep done
                         end else begin
@@ -156,11 +208,6 @@ module ws_tiling_engine #(
                             a_base_r <= '0;
                             state    <= E_GO;
                         end
-                    end else begin
-                        k_cnt    <= k_cnt + 1'b1;        // next K-tile
-                        t_idx    <= t_idx + 1'b1;
-                        a_base_r <= a_base_r + nv_q;
-                        state    <= E_GO;
                     end
                 end
 
@@ -207,6 +254,59 @@ module ws_tiling_engine #(
                     acc[j][v_cnt[j]] <= acc[j][v_cnt[j]] + sum_in[j];
             end
         end
+    end
+
+    //----------------------------------------------------------------
+    // Drain pipe: bank read (stage 1) -> shared requant core ->
+    // registered result stream (stage 2). One value per E_DRAIN
+    // cycle; res_valid trails the issue by 2 cycles (E_FLUSH covers
+    // the tail, so busy stays high until the last result is out).
+    // Valids are control (async reset); data regs are datapath (none).
+    //----------------------------------------------------------------
+    logic                        dr_issue;
+    assign dr_issue = (state == E_DRAIN);
+
+    logic                        p1_valid;
+    logic signed [ACC_WIDTH-1:0] p1_acc;
+    logic [VEC_W-1:0]            p1_v;
+    logic [$clog2(N)-1:0]        p1_j;
+    logic [TILE_W-1:0]           p1_nt;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) p1_valid <= 1'b0;
+        else        p1_valid <= dr_issue;
+    end
+
+    always_ff @(posedge clk) begin
+        p1_acc <= acc[dr_j][dr_v];
+        p1_v   <= dr_v;
+        p1_j   <= dr_j;
+        p1_nt  <= n_cnt;
+    end
+
+    logic signed [OUT_WIDTH-1:0] rq_final;
+
+    requant #(
+        .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
+        .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
+    ) u_rq_final (
+        .acc_in     (p1_acc),
+        .relu_en    (relu_en),
+        .scale_mult (scale_mult),
+        .shift_amt  (shift_amt),
+        .out        (rq_final)
+    );
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) res_valid <= 1'b0;
+        else        res_valid <= p1_valid;
+    end
+
+    always_ff @(posedge clk) begin
+        res_q8    <= rq_final;
+        res_vec   <= p1_v;
+        res_col   <= p1_j;
+        res_ntile <= p1_nt;
     end
 
 endmodule
