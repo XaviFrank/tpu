@@ -1,0 +1,371 @@
+`timescale 1ns / 1ps
+//====================================================================
+// tb_ws_tiling_engine: unit TB for the WS tiling engine (N=4, single
+// clock - the engine is a core-domain module; CDC is axi_lite_ctrl's
+// job and is not re-verified here). Engine + REAL ws_quant_unit.
+//   T1: K_TILES=2, N_TILES=1, nv=2 - accumulate-on-write proven by
+//       hierarchical peeks: after k-tile 0 the banks hold exactly the
+//       partial (tile-0) sums (fresh write), after k-tile 1 exactly
+//       partial0+partial1 (added, not overwritten).
+//   T2: sequencing monitors across a 2x2 sweep - w_tile_idx sequence
+//       0,1,2,3; a_base 0,nv,0,nv; exactly K_TILES*N_TILES inner gos.
+//   T3: cfg_err guard - n_vecs > MAX_N_VECS (engine built with
+//       MAX_N_VECS=4, nv=5 written), k_tiles=0, and capacity overflow
+//       are each rejected: busy never rises, cfg_err sets; a valid go
+//       clears it.
+//   (T4/T5 - final requant stream + intermediate-not-authoritative -
+//    land with the Task 2 drain tap.)
+// Golden: 8x4 weight matrix (2 K-tiles of 4x4), 8-element activation
+// vectors; y[j] = sum_{i<8} W[i][j]*a[i]. Host layout per the plan's
+// data-layout contract: tile (n,k) at index n*k_tiles+k, activation
+// chunk k at words k*nv..k*nv+nv-1.
+//====================================================================
+module tb_ws_tiling_engine;
+
+    localparam int N          = 4;
+    localparam int K          = 4;
+    localparam int DATA_WIDTH = 8;
+    localparam int ACC_WIDTH  = 32;
+    localparam int OUT_WIDTH  = 8;
+    localparam int DEPTH      = 64;
+    localparam int VEC_W      = 4;
+    localparam int TILE_W     = 4;
+    localparam int MAX_NV     = 4;    // deliberately small: T3 exceeds it
+
+    logic clk = 1'b0;
+    logic rst_n;
+
+    // outer command
+    logic              go;
+    logic [VEC_W-1:0]  n_vecs;
+    logic [TILE_W-1:0] k_tiles, n_tiles;
+    logic              busy, cfg_err;
+
+    // requant config (per-tensor; identity here, checked in T4)
+    logic               relu_en;
+    logic signed [15:0] scale_mult;
+    logic [4:0]         shift_amt;
+
+    // engine <-> core nets
+    logic                        core_go, core_busy;
+    logic [VEC_W-1:0]            core_n_vecs;
+    logic [$clog2(DEPTH/K)-1:0]  w_tile_idx;
+    logic [$clog2(DEPTH)-1:0]    a_base;
+
+    // core raw/quant edges
+    logic signed [ACC_WIDTH-1:0] sum_out   [N];
+    logic                        sum_valid [N];
+    logic signed [OUT_WIDTH-1:0] q8_out    [N];
+    logic                        q8_valid  [N];
+
+    // buffer write ports (TB is the data loader)
+    logic        wr_en_w, wr_en_a;
+    logic [5:0]  wr_addr_w, wr_addr_a;
+    logic [31:0] wr_data_w, wr_data_a;
+
+    logic        perf_clear;
+    logic [3:0]  perf_addr;
+    logic [31:0] perf_data;
+
+    int errors = 0;
+
+    ws_tiling_engine #(
+        .N(N), .K(K), .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
+        .DEPTH(DEPTH), .VEC_W(VEC_W), .TILE_W(TILE_W),
+        .MAX_N_VECS(MAX_NV), .SCALE_WIDTH(16), .SHIFT_WIDTH(5)
+    ) u_eng (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .go           (go),
+        .n_vecs       (n_vecs),
+        .k_tiles      (k_tiles),
+        .n_tiles      (n_tiles),
+        .busy         (busy),
+        .cfg_err      (cfg_err),
+        .relu_en      (relu_en),
+        .scale_mult   (scale_mult),
+        .shift_amt    (shift_amt),
+        .core_go      (core_go),
+        .core_busy    (core_busy),
+        .core_n_vecs  (core_n_vecs),
+        .w_tile_idx   (w_tile_idx),
+        .a_base       (a_base),
+        .sum_in       (sum_out),
+        .sum_valid_in (sum_valid)
+    );
+
+    ws_quant_unit #(
+        .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
+        .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH)
+    ) u_ws (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .go         (core_go),
+        .w_tile_idx (w_tile_idx),
+        .a_base     (a_base),
+        .n_vecs     (core_n_vecs),
+        .busy       (core_busy),
+        .perf_clear (perf_clear),
+        .perf_addr  (perf_addr),
+        .perf_data  (perf_data),
+        .wr_en_w    (wr_en_w),
+        .wr_addr_w  (wr_addr_w),
+        .wr_data_w  (wr_data_w),
+        .wr_en_a    (wr_en_a),
+        .wr_addr_a  (wr_addr_a),
+        .wr_data_a  (wr_data_a),
+        .sum_out    (sum_out),
+        .sum_valid  (sum_valid),
+        .q8_out     (q8_out),
+        .q8_valid   (q8_valid),
+        .relu_en    (relu_en),
+        .scale_mult (scale_mult),
+        .shift_amt  (shift_amt)
+    );
+
+    // 100 MHz clock
+    always #5 clk = ~clk;
+
+    // watchdog
+    initial begin
+        #2_000_000;
+        $error("[watchdog] TIMEOUT");
+        $finish;
+    end
+
+    //----------------------------------------------------------------
+    // Golden: 8x4 problem for T1 (2 K-tiles x 1 N-tile), extended to
+    // 8x8 for T2/T4 (2x2). W[i][gcol] with i<8, gcol<8; tile (n,k)
+    // holds resident rows k*4..k*4+3, columns n*4..n*4+3, stored at
+    // buffer tile index n*k_tiles + k. av[v][i], i<8.
+    //----------------------------------------------------------------
+    int W  [8][8];
+    int av [2][8];
+
+    function automatic int clamp8(input int v, input int relu);
+        int r;
+        r = v;
+        if (relu != 0 && r < 0) r = 0;
+        if (r > 127)  r = 127;
+        if (r < -128) r = -128;
+        return r;
+    endfunction
+
+    // partial sum for K-tile k only, global column gcol
+    function automatic int partial(input int k, input int v, input int gcol);
+        int y;
+        y = 0;
+        for (int i = 0; i < 4; i++)
+            y = y + W[k*4 + i][gcol]*av[v][k*4 + i];
+        return y;
+    endfunction
+
+    // full K=8 dot product, global column gcol
+    function automatic int full_y(input int v, input int gcol);
+        int y;
+        y = 0;
+        for (int i = 0; i < 8; i++)
+            y = y + W[i][gcol]*av[v][i];
+        return y;
+    endfunction
+
+    function automatic [31:0] pack4(input int e0, input int e1,
+                                    input int e2, input int e3);
+        int b0, b1, b2, b3;
+        begin
+            b0 = (e0 < 0) ? e0 + 256 : e0;
+            b1 = (e1 < 0) ? e1 + 256 : e1;
+            b2 = (e2 < 0) ? e2 + 256 : e2;
+            b3 = (e3 < 0) ? e3 + 256 : e3;
+            pack4 = {b3[7:0], b2[7:0], b1[7:0], b0[7:0]};
+        end
+    endfunction
+
+    task automatic write_w(input int addr, input [31:0] data);
+        @(negedge clk) begin wr_en_w = 1; wr_addr_w = addr; wr_data_w = data; end
+        @(negedge clk) wr_en_w = 0;
+    endtask
+
+    task automatic write_a(input int addr, input [31:0] data);
+        @(negedge clk) begin wr_en_a = 1; wr_addr_a = addr; wr_data_a = data; end
+        @(negedge clk) wr_en_a = 0;
+    endtask
+
+    // load tile (n,k) for a run with kt K-tiles: buffer index n*kt+k,
+    // word r = resident row r = W[k*4+r][n*4 .. n*4+3]
+    task automatic load_tile(input int n, input int k, input int kt);
+        for (int r = 0; r < 4; r++)
+            write_w((n*kt + k)*K + r,
+                    pack4(W[k*4+r][n*4+0], W[k*4+r][n*4+1],
+                          W[k*4+r][n*4+2], W[k*4+r][n*4+3]));
+    endtask
+
+    // load activation chunk k for vector v at word k*nv + v
+    task automatic load_avec(input int k, input int v, input int nv);
+        write_a(k*nv + v, pack4(av[v][k*4+0], av[v][k*4+1],
+                                av[v][k*4+2], av[v][k*4+3]));
+    endtask
+
+    //----------------------------------------------------------------
+    // Monitors: inner-done counter (core_busy falling edges) and the
+    // per-inner-go tile/base recorder (T2's sequencing evidence)
+    //----------------------------------------------------------------
+    logic core_busy_q = 1'b0;
+    int inner_done_cnt = 0;
+
+    always @(posedge clk) begin
+        if (rst_n) begin
+            if (core_busy_q === 1'b1 && core_busy === 1'b0)
+                inner_done_cnt = inner_done_cnt + 1;
+            core_busy_q <= core_busy;
+        end
+    end
+
+    int go_cnt = 0;
+    int seen_tidx  [8];
+    int seen_abase [8];
+
+    always @(posedge clk) begin
+        if (rst_n && core_go === 1'b1) begin
+            seen_tidx[go_cnt]  = w_tile_idx;
+            seen_abase[go_cnt] = a_base;
+            go_cnt = go_cnt + 1;
+        end
+    end
+
+    task automatic check_int(input string name, input int got, input int exp);
+        if (got !== exp) begin
+            errors++;
+            $error("[%s] got %0d, expected %0d", name, got, exp);
+        end else begin
+            $display("PASS [%s] = %0d", name, got);
+        end
+    endtask
+
+    //----------------------------------------------------------------
+    // Main sequence
+    //----------------------------------------------------------------
+    initial begin
+        rst_n = 0; go = 0; n_vecs = '0; k_tiles = '0; n_tiles = '0;
+        relu_en = 0; scale_mult = 16'sd1; shift_amt = '0;
+        wr_en_w = 0; wr_addr_w = '0; wr_data_w = '0;
+        wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
+        perf_clear = 0; perf_addr = '0;
+
+        // deterministic golden data: mixed signs, partial != full for
+        // many elements (T5 relies on that; T1 checks it structurally)
+        for (int i = 0; i < 8; i++)
+            for (int j = 0; j < 8; j++)
+                W[i][j] = ((i*5 + j*3) % 19) - 9;             // -9..9
+        for (int v = 0; v < 2; v++)
+            for (int i = 0; i < 8; i++)
+                av[v][i] = ((v*11 + i*7) % 15) - 7;           // -7..7
+
+        repeat (3) @(negedge clk);
+        rst_n = 1;
+        @(negedge clk);
+
+        //--- T1: K_TILES=2, N_TILES=1, nv=2 - accumulate-on-write -----
+        // layout for kt=2: tiles at idx 0,1; chunks at words 0..1, 2..3
+        load_tile(0, 0, 2);
+        load_tile(0, 1, 2);
+        for (int v = 0; v < 2; v++) begin
+            load_avec(0, v, 2);
+            load_avec(1, v, 2);
+        end
+
+        inner_done_cnt = 0; go_cnt = 0;
+        @(negedge clk) begin go = 1; n_vecs = 4'd2; k_tiles = 4'd2; n_tiles = 4'd1; end
+        @(negedge clk) go = 0;
+
+        // after K-tile 0 completes (first inner busy fall), the banks
+        // must hold exactly the fresh-written partial-0 sums
+        while (inner_done_cnt < 1) @(negedge clk);
+        repeat (2) @(negedge clk);
+        for (int v = 0; v < 2; v++)
+            for (int j = 0; j < 4; j++)
+                if (u_eng.acc[j][v] !== partial(0, v, j)) begin
+                    errors++;
+                    $error("[T1 k0] acc[%0d][%0d] = %0d, expected partial0 %0d",
+                           j, v, u_eng.acc[j][v], partial(0, v, j));
+                end
+        $display("PASS [T1 k0] banks hold fresh partial-0 sums");
+
+        // after the sweep, banks must hold partial0+partial1 (added)
+        while (busy) @(negedge clk);
+        @(negedge clk);
+        for (int v = 0; v < 2; v++)
+            for (int j = 0; j < 4; j++)
+                if (u_eng.acc[j][v] !== full_y(v, j)) begin
+                    errors++;
+                    $error("[T1 k1] acc[%0d][%0d] = %0d, expected full %0d",
+                           j, v, u_eng.acc[j][v], full_y(v, j));
+                end
+        $display("PASS [T1 k1] banks accumulated, not overwritten");
+        check_int("T1 inner gos", go_cnt, 2);
+
+        //--- T2: 2x2 sweep sequencing (tiles 2,3 zero-filled) ---------
+        for (int t = 2; t < 4; t++)
+            for (int r = 0; r < 4; r++)
+                write_w(t*K + r, 32'h0);
+
+        inner_done_cnt = 0; go_cnt = 0;
+        @(negedge clk) begin go = 1; n_vecs = 4'd2; k_tiles = 4'd2; n_tiles = 4'd2; end
+        @(negedge clk) go = 0;
+        while (busy) @(negedge clk);
+        @(negedge clk);
+
+        check_int("T2 inner gos", go_cnt, 4);
+        check_int("T2 tidx0", seen_tidx[0], 0);
+        check_int("T2 tidx1", seen_tidx[1], 1);
+        check_int("T2 tidx2", seen_tidx[2], 2);
+        check_int("T2 tidx3", seen_tidx[3], 3);
+        check_int("T2 abase0", seen_abase[0], 0);
+        check_int("T2 abase1", seen_abase[1], 2);
+        check_int("T2 abase2", seen_abase[2], 0);
+        check_int("T2 abase3", seen_abase[3], 2);
+
+        //--- T3: cfg_err guard - rejects, busy never rises ------------
+        // (engine built with MAX_N_VECS=4; nv=5 exceeds it)
+        go_cnt = 0;
+        @(negedge clk) begin go = 1; n_vecs = 4'd5; k_tiles = 4'd1; n_tiles = 4'd1; end
+        @(negedge clk) go = 0;
+        repeat (6) @(negedge clk);
+        if (busy !== 1'b0 || cfg_err !== 1'b1) begin
+            errors++;
+            $error("[T3 nv>MAX] busy=%b cfg_err=%b, expected 0/1", busy, cfg_err);
+        end else $display("PASS [T3] nv > MAX_N_VECS rejected, cfg_err set");
+
+        @(negedge clk) begin go = 1; n_vecs = 4'd1; k_tiles = 4'd0; n_tiles = 4'd1; end
+        @(negedge clk) go = 0;
+        repeat (6) @(negedge clk);
+        if (busy !== 1'b0 || cfg_err !== 1'b1) begin
+            errors++;
+            $error("[T3 kt=0] busy=%b cfg_err=%b, expected 0/1", busy, cfg_err);
+        end else $display("PASS [T3] k_tiles=0 rejected");
+
+        @(negedge clk) begin go = 1; n_vecs = 4'd1; k_tiles = 4'd8; n_tiles = 4'd8; end
+        @(negedge clk) go = 0;
+        repeat (6) @(negedge clk);
+        if (busy !== 1'b0 || cfg_err !== 1'b1) begin
+            errors++;
+            $error("[T3 cap] busy=%b cfg_err=%b, expected 0/1", busy, cfg_err);
+        end else $display("PASS [T3] tile capacity overflow rejected");
+
+        // a valid go clears cfg_err and runs to completion
+        @(negedge clk) begin go = 1; n_vecs = 4'd1; k_tiles = 4'd1; n_tiles = 4'd1; end
+        @(negedge clk) go = 0;
+        @(negedge clk);
+        if (cfg_err !== 1'b0) begin
+            errors++; $error("[T3 clear] cfg_err not cleared by accepted go");
+        end else $display("PASS [T3] accepted go clears cfg_err");
+        while (busy) @(negedge clk);
+
+        //--- summary ---------------------------------------------------
+        repeat (2) @(negedge clk);
+        if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
+        else             $display("\n=== %0d ERROR(S) ===", errors);
+        $finish;
+    end
+
+endmodule

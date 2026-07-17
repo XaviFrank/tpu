@@ -78,5 +78,12 @@ run_tb tb_ws_tpu_n16     rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
                          rtl/axi_lite_ctrl.sv rtl/ws_tpu_top.sv tb/tb_ws_tpu_n16.sv
 
+# --- WS tiling engine (multi-tile sweep over ws_quant_unit) ---
+run_tb tb_ws_tiling_engine rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
+                         rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/perf_counters.sv rtl/ws_perf_counters.sv \
+                         rtl/requant.sv rtl/ws_quant_unit.sv \
+                         rtl/ws_tiling_engine.sv tb/tb_ws_tiling_engine.sv
+
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
