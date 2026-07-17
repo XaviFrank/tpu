@@ -20,10 +20,18 @@
 // - go/done pulse spacing relies on AXI transaction pacing and
 //   assumes core_clk is not slower than ~aclk/3 (see pulse_sync).
 // - wstrb is accepted but ignored: full-word 32-bit writes only.
+// - When the core sits behind ws_tiling_engine (tiled top), go/busy/
+//   done describe the OUTER sweep; K_TILES/N_TILES follow the same
+//   settle-before-go rule as N_VECS. STATUS[2] (cfg_err, sync_2ff'd
+//   level) means the last go was REJECTED by the engine (bad n_vecs/
+//   tile counts/capacity): busy never rises and done never arrives -
+//   but the go write already cleared done. A host whose done poll
+//   times out must check STATUS[2] before assuming a hang.
 //
 // Register map (byte offsets; word decode on addr[5:2]):
 //   0x00 CTRL        W  [0] go - self-clearing pulse, clears done
-//   0x04 STATUS      R  [0] busy (sync_2ff), [1] done (sticky)
+//   0x04 STATUS      R  [0] busy (sync_2ff), [1] done (sticky),
+//                       [2] cfg_err (sync_2ff level)
 //   0x08 N_VECS      W  [VEC_W-1:0]; AXI-side readback supported
 //   0x0C REQUANT_CFG W  [15:0] scale_mult, [20:16] shift_amt,
 //                       [21] relu_en (22 bits - one register)
@@ -32,6 +40,8 @@
 //                       write (round trip ~4-6 aclk + ~6 core clks;
 //                       hosts should budget 20 aclk - hosts write
 //                       PERF_SEL, wait, then read)
+//   0x18 K_TILES     W  [TILE_W-1:0]; AXI-side readback supported
+//   0x1C N_TILES     W  [TILE_W-1:0]; AXI-side readback supported
 //
 // CDC per signal class (spec section 2): go/done pulse_sync, busy
 // sync_2ff, every multi-bit value bus_handshake (req/ack, source
@@ -49,7 +59,8 @@
 module axi_lite_ctrl #(
     parameter int VEC_W       = 4,
     parameter int SCALE_WIDTH = 16,
-    parameter int SHIFT_WIDTH = 5
+    parameter int SHIFT_WIDTH = 5,
+    parameter int TILE_W      = 4
 )(
     // AXI-Lite subordinate (PS domain)
     input  logic        s_axi_aclk,
@@ -78,6 +89,9 @@ module axi_lite_ctrl #(
     output logic                          core_go,
     input  logic                          core_busy,
     output logic [VEC_W-1:0]              core_n_vecs,
+    output logic [TILE_W-1:0]             core_k_tiles,
+    output logic [TILE_W-1:0]             core_n_tiles,
+    input  logic                          core_cfg_err,
     output logic                          core_relu_en,
     output logic signed [SCALE_WIDTH-1:0] core_scale_mult,
     output logic [SHIFT_WIDTH-1:0]        core_shift_amt,
@@ -94,6 +108,8 @@ module axi_lite_ctrl #(
     localparam logic [3:0] A_CFG    = 4'h3;
     localparam logic [3:0] A_PSEL   = 4'h4;
     localparam logic [3:0] A_PDATA  = 4'h5;
+    localparam logic [3:0] A_KTILES = 4'h6;   // 0x18
+    localparam logic [3:0] A_NTILES = 4'h7;   // 0x1C
 
     //----------------------------------------------------------------
     // Write channel: capture AW / W independently, commit together
@@ -114,9 +130,11 @@ module axi_lite_ctrl #(
     logic [VEC_W-1:0] nvecs_reg;
     logic [CFG_W-1:0] cfg_reg;
     logic [3:0]       psel_reg;
-    logic nvecs_dirty, cfg_dirty, psel_dirty;
-    logic nvecs_send,  cfg_send,  psel_send;
-    logic nvecs_hs_busy, cfg_hs_busy, psel_hs_busy;
+    logic [TILE_W-1:0] ktiles_reg;
+    logic [TILE_W-1:0] ntiles_reg;
+    logic nvecs_dirty, cfg_dirty, psel_dirty, ktiles_dirty, ntiles_dirty;
+    logic nvecs_send,  cfg_send,  psel_send,  ktiles_send,  ntiles_send;
+    logic nvecs_hs_busy, cfg_hs_busy, psel_hs_busy, ktiles_hs_busy, ntiles_hs_busy;
     logic go_pulse_axi;
 
     always_ff @(posedge s_axi_aclk or negedge s_axi_aresetn) begin
@@ -129,17 +147,25 @@ module axi_lite_ctrl #(
             nvecs_reg    <= '0;
             cfg_reg      <= '0;
             psel_reg     <= '0;
+            ktiles_reg   <= '0;
+            ntiles_reg   <= '0;
             nvecs_dirty  <= 1'b0;
             cfg_dirty    <= 1'b0;
             psel_dirty   <= 1'b0;
+            ktiles_dirty <= 1'b0;
+            ntiles_dirty <= 1'b0;
             nvecs_send   <= 1'b0;
             cfg_send     <= 1'b0;
             psel_send    <= 1'b0;
+            ktiles_send  <= 1'b0;
+            ntiles_send  <= 1'b0;
             go_pulse_axi <= 1'b0;
         end else begin
             nvecs_send   <= 1'b0;
             cfg_send     <= 1'b0;
             psel_send    <= 1'b0;
+            ktiles_send  <= 1'b0;
+            ntiles_send  <= 1'b0;
             go_pulse_axi <= go_write;
 
             if (s_axi_awvalid && s_axi_awready) begin
@@ -172,6 +198,14 @@ module axi_lite_ctrl #(
                 psel_send  <= 1'b1;
                 psel_dirty <= 1'b0;
             end
+            if (ktiles_dirty && !ktiles_hs_busy && !ktiles_send) begin
+                ktiles_send  <= 1'b1;
+                ktiles_dirty <= 1'b0;
+            end
+            if (ntiles_dirty && !ntiles_hs_busy && !ntiles_send) begin
+                ntiles_send  <= 1'b1;
+                ntiles_dirty <= 1'b0;
+            end
 
             if (commit) begin
                 case (waddr_q)
@@ -186,6 +220,14 @@ module axi_lite_ctrl #(
                     A_PSEL: begin
                         psel_reg   <= wdata_q[3:0];
                         psel_dirty <= 1'b1;
+                    end
+                    A_KTILES: begin
+                        ktiles_reg   <= wdata_q[TILE_W-1:0];
+                        ktiles_dirty <= 1'b1;
+                    end
+                    A_NTILES: begin
+                        ntiles_reg   <= wdata_q[TILE_W-1:0];
+                        ntiles_dirty <= 1'b1;
                     end
                     default: ;      // CTRL handled via go_write; others ignored
                 endcase
@@ -220,6 +262,15 @@ module axi_lite_ctrl #(
         .rst_n (s_axi_aresetn),
         .d     (core_busy),
         .q     (busy_axi)
+    );
+
+    logic cfgerr_axi;
+
+    sync_2ff u_cdc_cfgerr (
+        .clk   (s_axi_aclk),
+        .rst_n (s_axi_aresetn),
+        .d     (core_cfg_err),
+        .q     (cfgerr_axi)
     );
 
     //----------------------------------------------------------------
@@ -307,6 +358,32 @@ module axi_lite_ctrl #(
         .dst_valid (psel_valid_core)
     );
 
+    logic ktiles_valid_core, ntiles_valid_core;
+
+    bus_handshake #(.W(TILE_W)) u_hs_ktiles (
+        .src_clk   (s_axi_aclk),
+        .src_rst_n (s_axi_aresetn),
+        .src_data  (ktiles_reg),
+        .src_send  (ktiles_send),
+        .src_busy  (ktiles_hs_busy),
+        .dst_clk   (core_clk),
+        .dst_rst_n (core_rst_n),
+        .dst_data  (core_k_tiles),
+        .dst_valid (ktiles_valid_core)
+    );
+
+    bus_handshake #(.W(TILE_W)) u_hs_ntiles (
+        .src_clk   (s_axi_aclk),
+        .src_rst_n (s_axi_aresetn),
+        .src_data  (ntiles_reg),
+        .src_send  (ntiles_send),
+        .src_busy  (ntiles_hs_busy),
+        .dst_clk   (core_clk),
+        .dst_rst_n (core_rst_n),
+        .dst_data  (core_n_tiles),
+        .dst_valid (ntiles_valid_core)
+    );
+
     //----------------------------------------------------------------
     // Perf response: core_perf_data is valid one core cycle after
     // core_perf_addr lands (registered read port); wait two cycles
@@ -364,11 +441,13 @@ module axi_lite_ctrl #(
             if (s_axi_arvalid && s_axi_arready) begin
                 s_axi_rvalid <= 1'b1;
                 case (s_axi_araddr[5:2])
-                    A_STATUS: s_axi_rdata <= {30'b0, done_ff, busy_axi};
+                    A_STATUS: s_axi_rdata <= {29'b0, cfgerr_axi, done_ff, busy_axi};
                     A_NVECS:  s_axi_rdata <= {{(32-VEC_W){1'b0}}, nvecs_reg};
                     A_CFG:    s_axi_rdata <= {{(32-CFG_W){1'b0}}, cfg_reg};
                     A_PSEL:   s_axi_rdata <= {28'b0, psel_reg};
                     A_PDATA:  s_axi_rdata <= pdata_shadow;
+                    A_KTILES: s_axi_rdata <= {{(32-TILE_W){1'b0}}, ktiles_reg};
+                    A_NTILES: s_axi_rdata <= {{(32-TILE_W){1'b0}}, ntiles_reg};
                     default:  s_axi_rdata <= '0;
                 endcase
             end else if (s_axi_rvalid && s_axi_rready) begin

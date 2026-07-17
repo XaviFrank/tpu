@@ -114,6 +114,12 @@ module ws_tpu_top #(
     assign tile_zero  = '0;
     assign abase_zero = '0;
 
+    // tiling-era axi_lite_ctrl ports, unused in the single-tile top
+    logic       cfg_err_zero;
+    logic [3:0] unused_k_tiles;
+    logic [3:0] unused_n_tiles;
+    assign cfg_err_zero = 1'b0;
+
     axi_lite_ctrl #(
         .VEC_W(VEC_W), .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
     ) u_ctrl (
@@ -141,6 +147,9 @@ module ws_tpu_top #(
         .core_go         (core_go),
         .core_busy       (core_busy),
         .core_n_vecs     (core_n_vecs),
+        .core_k_tiles    (unused_k_tiles),
+        .core_n_tiles    (unused_n_tiles),
+        .core_cfg_err    (cfg_err_zero),
         .core_relu_en    (core_relu_en),
         .core_scale_mult (core_scale_mult),
         .core_shift_amt  (core_shift_amt),
