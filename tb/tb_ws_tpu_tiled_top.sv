@@ -12,6 +12,12 @@
 //   F3: cfg_err over AXI - K_TILES=0 go is rejected: busy never
 //       rises, STATUS[2] sets, done never arrives
 //   F4: K_TILES==1 collapse - res_* == inner q8 == untiled 16-row reference; accepted go clears cfg_err.
+//   F5: go-while-busy is dropped - busy holds, no cfg_err, no extra
+//       inner tiles (swaps +4 not +8), one sweep's worth of results
+//   F6: K_TILES/N_TILES rewritten mid-sweep - running sweep uses the
+//       latched 2x2; F6b proves the next go picks up the new 1x1
+//   F7: fastest legal re-arm - go written immediately after done, x3;
+//       every go delivered (swaps +1 each), results exact
 // Layout per the loader contract: tile (n,k) at index n*K_TILES+k,
 // activation chunk k at words k*n_vecs..+n_vecs-1.
 //====================================================================
@@ -353,6 +359,22 @@ module tb_ws_tpu_tiled_top;
         exp_swaps = exp_swaps + kt*nt;
     endtask
 
+    // Program the register set WITHOUT issuing go. F5/F6 drive go
+    // themselves so they can inject AXI traffic mid-sweep; run_sweep is
+    // left untouched so F1-F4 keep their exact existing behavior.
+    task automatic program_regs(input int nv, input int kt, input int nt,
+                                input int relu);
+        logic [31:0] cfgword;
+        cfgword = '0;
+        cfgword[0] = 1'b1;                 // scale_mult = 1, shift = 0
+        if (relu != 0) cfgword[21] = 1'b1;
+        axi_write(ADDR_NVECS,  nv);
+        axi_write(ADDR_CFG,    cfgword);
+        axi_write(ADDR_KTILES, kt);
+        axi_write(ADDR_NTILES, nt);
+        repeat (CFG_SETTLE_ACLKS) @(negedge aclk);
+    endtask
+
     // check the collected res stream against a golden K-total
     task automatic check_res(input int nv, input int nt, input int ktotal,
                              input int relu, input string name);
@@ -478,6 +500,113 @@ module tb_ws_tpu_tiled_top;
             if (mismatches == 0)
                 $display("PASS [F4] kt=1: inner q8 stream == engine res stream (collapse proven)");
         end
+
+        //--- F5: a go written while busy is dropped -------------------
+        // axi_lite_ctrl's header states the contract: "A go written
+        // while busy is DROPPED by the core (accepted only when idle)
+        // but still clears done". The engine backs that structurally -
+        // go is sampled ONLY in E_IDLE, so cfg_bad is never even
+        // evaluated for the intruder. Three things must hold: the
+        // sweep is not aborted (busy stays up), the intruder adds no
+        // inner work (tile_swaps still +4, not +8), and no spurious
+        // cfg_err appears. res_cnt == 64 rather than 128 is the
+        // independent witness that only ONE sweep ran.
+        program_regs(2, 2, 2, 0);
+        res_cnt = 0;
+        axi_write(ADDR_CTRL, 32'h1);
+        repeat (2) @(negedge aclk);
+        axi_read(ADDR_STATUS, rd);
+        if (rd[0] !== 1'b1) begin
+            errors++;
+            $error("[F5] outer busy not up before the intruder go (STATUS=%h)", rd);
+        end
+
+        axi_write(ADDR_CTRL, 32'h1);          // intruder go, mid-sweep
+        axi_read(ADDR_STATUS, rd);
+        if (rd[0] !== 1'b1) begin
+            errors++;
+            $error("[F5] busy fell after the intruder go - sweep aborted (STATUS=%h)", rd);
+        end else if (rd[2] !== 1'b0) begin
+            errors++;
+            $error("[F5] intruder go raised cfg_err (STATUS=%h)", rd);
+        end else
+            $display("PASS [F5] go-while-busy: busy held, cfg_err stayed clear");
+
+        poll_status_bit(1, "F5");
+        repeat (10) @(negedge aclk);
+        exp_swaps = exp_swaps + 4;            // dropped go adds no inner tiles
+        check_res(2, 2, 32, 0, "F5 go-while-busy");
+        perf_check_swaps("F5");
+
+        //--- F6: K_TILES/N_TILES rewritten mid-sweep ------------------
+        // Latch-at-go construction: the engine copies k_tiles/n_tiles
+        // into kt_q/nt_q on the accepted go and never re-reads the
+        // inputs, so a mid-sweep rewrite must not perturb the running
+        // sweep. The AXI register itself DOES update - proven by the
+        // mid-sweep readback and by F6b, where the next go latches the
+        // new values with no reprogramming in between.
+        program_regs(2, 2, 2, 0);
+        res_cnt = 0;
+        axi_write(ADDR_CTRL, 32'h1);
+        repeat (2) @(negedge aclk);
+        axi_read(ADDR_STATUS, rd);
+        if (rd[0] !== 1'b1) begin
+            errors++;
+            $error("[F6] outer busy not up before the mid-sweep rewrite (STATUS=%h)", rd);
+        end
+
+        axi_write(ADDR_KTILES, 32'h1);        // rewrite 2x2 -> 1x1 mid-sweep
+        axi_write(ADDR_NTILES, 32'h1);
+        axi_read(ADDR_KTILES, rd);
+        if (rd !== 32'h1) begin
+            errors++;
+            $error("[F6] K_TILES readback mid-sweep = %0d, wrote 1", rd);
+        end
+        axi_read(ADDR_STATUS, rd);
+        if (rd[0] !== 1'b1) begin
+            errors++;
+            $error("[F6] busy fell during the rewrite - sweep disturbed (STATUS=%h)", rd);
+        end else
+            $display("PASS [F6] mid-sweep K/N_TILES rewrite accepted, busy undisturbed");
+
+        poll_status_bit(1, "F6");
+        repeat (10) @(negedge aclk);
+        exp_swaps = exp_swaps + 4;            // ran the LATCHED 2x2, not 1x1
+        check_res(2, 2, 32, 0, "F6 mid-sweep rewrite");
+        perf_check_swaps("F6");
+
+        //--- F6b: the rewritten values are what the NEXT go latches ---
+        // No reprogramming here - the only values in the register map
+        // are the ones F6 wrote mid-sweep. A 1x1 sweep (tile 0 at
+        // index 0, chunk 0 at words 0..1 - same layout F4 uses) must
+        // now run: 32 results against the 16-row reference, +1 swap.
+        res_cnt = 0;
+        axi_write(ADDR_CTRL, 32'h1);
+        poll_status_bit(1, "F6b");
+        repeat (10) @(negedge aclk);
+        exp_swaps = exp_swaps + 1;
+        check_res(2, 1, 16, 0, "F6b rewrite takes effect on next go");
+        perf_check_swaps("F6b");
+
+        //--- F7: fastest LEGAL re-arm - go immediately after done -----
+        // The header's pacing caveat ("go/done pulse spacing relies on
+        // AXI transaction pacing") is about how tightly a correct host
+        // may re-arm. This drives exactly that worst case: config is
+        // untouched from F6b (so the settle-before-go rule is not
+        // being violated - that rule governs config writes, not go),
+        // and each new go follows the done that ended the previous
+        // sweep by only the AXI write itself. Three rounds; every one
+        // must deliver its go (swaps +1 each, never a merged or
+        // dropped pulse) and produce exact results.
+        for (int rep = 0; rep < 3; rep++) begin
+            res_cnt = 0;
+            axi_write(ADDR_CTRL, 32'h1);
+            poll_status_bit(1, "F7");
+            repeat (2) @(negedge aclk);       // collector drain only
+            exp_swaps = exp_swaps + 1;
+            check_res(2, 1, 16, 0, "F7 back-to-back re-arm");
+        end
+        perf_check_swaps("F7");
 
         //--- summary ----------------------------------------------------
         repeat (2) @(negedge aclk);

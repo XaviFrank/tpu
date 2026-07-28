@@ -15,6 +15,13 @@
 //       clears it.
 //   (T4/T5 - final requant stream + intermediate-not-authoritative -
 //    land with the Task 2 drain tap.)
+//   T6: the cfg_err legs T3 left untested - n_vecs == 0 (rejected, and
+//       specifically NOT read as 2^VEC_W) and n_tiles == 0.
+//   T7: the k_tiles*n_vecs > DEPTH leg, on a second MAX_N_VECS=8
+//       instance - that leg is masked whenever MAX_N_VECS <= K, which
+//       both shipping configs are (see the u_eng_guard header), so it
+//       cannot be reached on the main engine or from the tiled top.
+//       Includes the kt_x_nv == DEPTH accept case to pin the boundary.
 // Golden: 8x4 weight matrix (2 K-tiles of 4x4), 8-element activation
 // vectors; y[j] = sum_{i<8} W[i][j]*a[i]. Host layout per the plan's
 // data-layout contract: tile (n,k) at index n*k_tiles+k, activation
@@ -104,6 +111,77 @@ module tb_ws_tiling_engine;
         .res_vec      (res_vec),
         .res_col      (res_col),
         .res_ntile    (res_ntile)
+    );
+
+    //----------------------------------------------------------------
+    // T7 guard-only second instance (no core attached).
+    //
+    // The kt_x_nv leg (k_tiles*n_vecs > DEPTH) is UNREACHABLE IN
+    // ISOLATION whenever MAX_N_VECS <= K. The kt_x_nt guard already
+    // caps k_tiles at DEPTH/K, and n_vecs is capped at MAX_N_VECS, so
+    // the largest product any accepted-so-far config can present is
+    // (DEPTH/K)*MAX_N_VECS. That exceeds DEPTH only when
+    // MAX_N_VECS > K. BOTH shipping configurations sit exactly on the
+    // masked side of that boundary - this TB's main engine is K=4 /
+    // MAX_N_VECS=4, and ws_tpu_tiled_top is K=16 / MAX_N_VECS=16 - so
+    // neither can arm the leg, and it cannot be tested from the tiled
+    // top at all. This instance is built MAX_N_VECS=8 against K=4
+    // solely to reach it. Nothing downstream is wired: a REJECTED go
+    // never leaves E_IDLE, and the one accepted go at the end is only
+    // observed for busy rising, never run to completion.
+    //----------------------------------------------------------------
+    logic              g2_go, g2_busy, g2_cfg_err, g2_core_busy;
+    logic [VEC_W-1:0]  g2_n_vecs;
+    logic [TILE_W-1:0] g2_k_tiles, g2_n_tiles;
+    logic signed [ACC_WIDTH-1:0] g2_sum_in    [N];
+    logic                        g2_sum_valid [N];
+    logic                        g2_core_go;
+    logic [VEC_W-1:0]            g2_core_n_vecs;
+    logic [$clog2(DEPTH/K)-1:0]  g2_w_tile_idx;
+    logic [$clog2(DEPTH)-1:0]    g2_a_base;
+    logic                        g2_res_valid;
+    logic signed [OUT_WIDTH-1:0] g2_res_q8;
+    logic [VEC_W-1:0]            g2_res_vec;
+    logic [$clog2(N)-1:0]        g2_res_col;
+    logic [TILE_W-1:0]           g2_res_ntile;
+
+    assign g2_core_busy = 1'b0;
+
+    initial begin
+        for (int i = 0; i < N; i++) begin
+            g2_sum_in[i]    = '0;
+            g2_sum_valid[i] = 1'b0;
+        end
+    end
+
+    ws_tiling_engine #(
+        .N(N), .K(K), .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
+        .DEPTH(DEPTH), .VEC_W(VEC_W), .TILE_W(TILE_W),
+        .MAX_N_VECS(8), .SCALE_WIDTH(16), .SHIFT_WIDTH(5)
+    ) u_eng_guard (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .go           (g2_go),
+        .n_vecs       (g2_n_vecs),
+        .k_tiles      (g2_k_tiles),
+        .n_tiles      (g2_n_tiles),
+        .busy         (g2_busy),
+        .cfg_err      (g2_cfg_err),
+        .relu_en      (relu_en),
+        .scale_mult   (scale_mult),
+        .shift_amt    (shift_amt),
+        .core_go      (g2_core_go),
+        .core_busy    (g2_core_busy),
+        .core_n_vecs  (g2_core_n_vecs),
+        .w_tile_idx   (g2_w_tile_idx),
+        .a_base       (g2_a_base),
+        .sum_in       (g2_sum_in),
+        .sum_valid_in (g2_sum_valid),
+        .res_valid    (g2_res_valid),
+        .res_q8       (g2_res_q8),
+        .res_vec      (g2_res_vec),
+        .res_col      (g2_res_col),
+        .res_ntile    (g2_res_ntile)
     );
 
     ws_quant_unit #(
@@ -295,6 +373,7 @@ module tb_ws_tiling_engine;
     //----------------------------------------------------------------
     initial begin
         rst_n = 0; go = 0; n_vecs = '0; k_tiles = '0; n_tiles = '0;
+        g2_go = 0; g2_n_vecs = '0; g2_k_tiles = '0; g2_n_tiles = '0;
         relu_en = 0; scale_mult = 16'sd1; shift_amt = '0;
         wr_en_w = 0; wr_addr_w = '0; wr_data_w = '0;
         wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
@@ -468,6 +547,69 @@ module tb_ws_tiling_engine;
                 $display("PASS [T5] intermediate stream = per-tile partials (%0d elements differ from final; res_* is the only authoritative output)", diffs);
             end
         end
+
+        //--- T6: the two cfg_err legs T3 left untested -----------------
+        // T3 covers n_vecs > MAX_N_VECS, k_tiles == 0 and the kt_x_nt
+        // capacity leg. n_vecs == 0 and n_tiles == 0 were never
+        // exercised. n_vecs == 0 matters most: the engine header calls
+        // out that it is REJECTED and does not silently mean 2^VEC_W.
+        // T4/T5 ran accepted gos, so cfg_err must be clear on entry -
+        // assert that, or a stale sticky bit would fake both passes.
+        if (cfg_err !== 1'b0) begin
+            errors++;
+            $error("[T6] cfg_err = %b on entry, expected 0 (T4/T5 gos were accepted)", cfg_err);
+        end
+
+        @(negedge clk) begin go = 1; n_vecs = 4'd0; k_tiles = 4'd1; n_tiles = 4'd1; end
+        @(negedge clk) go = 0;
+        repeat (6) @(negedge clk);
+        if (busy !== 1'b0 || cfg_err !== 1'b1) begin
+            errors++;
+            $error("[T6 nv=0] busy=%b cfg_err=%b, expected 0/1", busy, cfg_err);
+        end else $display("PASS [T6] n_vecs=0 rejected (does not mean 2^VEC_W)");
+
+        @(negedge clk) begin go = 1; n_vecs = 4'd1; k_tiles = 4'd1; n_tiles = 4'd0; end
+        @(negedge clk) go = 0;
+        repeat (6) @(negedge clk);
+        if (busy !== 1'b0 || cfg_err !== 1'b1) begin
+            errors++;
+            $error("[T6 nt=0] busy=%b cfg_err=%b, expected 0/1", busy, cfg_err);
+        end else $display("PASS [T6] n_tiles=0 rejected");
+
+        //--- T7: the kt_x_nv leg, on the MAX_N_VECS=8 instance --------
+        // Unreachable on the main engine (MAX_N_VECS == K == 4); see
+        // the u_eng_guard header. Here DEPTH/K = 16 so kt_x_nt allows
+        // k_tiles up to 16, and MAX_N_VECS = 8 > K = 4 opens the gap.
+        //   reject: nv=8, kt=9, nt=1 -> kt_x_nv = 72 > DEPTH(64),
+        //           while kt_x_nt = 9 <= 16 and nv = 8 <= MAX_N_VECS,
+        //           so kt_x_nv is the ONLY leg that can be firing.
+        if (g2_cfg_err !== 1'b0 || g2_busy !== 1'b0) begin
+            errors++;
+            $error("[T7] guard instance not idle/clear on entry: busy=%b cfg_err=%b",
+                   g2_busy, g2_cfg_err);
+        end
+
+        @(negedge clk) begin g2_go = 1; g2_n_vecs = 4'd8; g2_k_tiles = 4'd9; g2_n_tiles = 4'd1; end
+        @(negedge clk) g2_go = 0;
+        repeat (6) @(negedge clk);
+        if (g2_busy !== 1'b0 || g2_cfg_err !== 1'b1) begin
+            errors++;
+            $error("[T7 kt_x_nv] busy=%b cfg_err=%b, expected 0/1", g2_busy, g2_cfg_err);
+        end else $display("PASS [T7] k_tiles*n_vecs > DEPTH rejected (leg isolated)");
+
+        //   accept: nv=8, kt=8 -> kt_x_nv = 64, NOT > DEPTH. Same shape,
+        //   one tile less, so this pins the boundary at exactly DEPTH
+        //   and proves the rejection above came from kt_x_nv alone.
+        //   Left running deliberately - no core is attached, so it
+        //   parks in E_WAITB; only the busy rise is observed.
+        @(negedge clk) begin g2_go = 1; g2_n_vecs = 4'd8; g2_k_tiles = 4'd8; g2_n_tiles = 4'd1; end
+        @(negedge clk) g2_go = 0;
+        repeat (6) @(negedge clk);
+        if (g2_busy !== 1'b1 || g2_cfg_err !== 1'b0) begin
+            errors++;
+            $error("[T7 boundary] kt_x_nv == DEPTH should be accepted: busy=%b cfg_err=%b, expected 1/0",
+                   g2_busy, g2_cfg_err);
+        end else $display("PASS [T7] k_tiles*n_vecs == DEPTH accepted (boundary is exact)");
 
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge clk);
