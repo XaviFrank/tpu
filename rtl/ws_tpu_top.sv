@@ -189,15 +189,20 @@ module ws_tpu_top #(
     // behaves byte-for-byte as before. On hardware they are tied off
     // and poke is the only writer.
     //----------------------------------------------------------------
-    logic              poke_en_w;
-    logic              mux_wr_en_w;
-    logic [BUF_AW-1:0] mux_wr_addr_w;
-    logic [WORD_W-1:0] mux_wr_data_w;
+    logic              poke_en_w, poke_en_a;
+    logic              mux_wr_en_w, mux_wr_en_a;
+    logic [BUF_AW-1:0] mux_wr_addr_w, mux_wr_addr_a;
+    logic [WORD_W-1:0] mux_wr_data_w, mux_wr_data_a;
 
     assign poke_en_w     = core_poke_valid && !core_poke_sel;
     assign mux_wr_en_w   = wr_en_w || poke_en_w;
     assign mux_wr_addr_w = wr_en_w ? wr_addr_w : core_poke_addr;
     assign mux_wr_data_w = wr_en_w ? wr_data_w : core_poke_data;
+
+    assign poke_en_a     = core_poke_valid && core_poke_sel;
+    assign mux_wr_en_a   = wr_en_a || poke_en_a;
+    assign mux_wr_addr_a = wr_en_a ? wr_addr_a : core_poke_addr;
+    assign mux_wr_data_a = wr_en_a ? wr_data_a : core_poke_data;
 
     //----------------------------------------------------------------
     // Peek read pipeline: registered on both sides so the lane mux
@@ -261,9 +266,9 @@ module ws_tpu_top #(
         .wr_en_w    (mux_wr_en_w),
         .wr_addr_w  (mux_wr_addr_w),
         .wr_data_w  (mux_wr_data_w),
-        .wr_en_a    (wr_en_a),
-        .wr_addr_a  (wr_addr_a),
-        .wr_data_a  (wr_data_a),
+        .wr_en_a    (mux_wr_en_a),
+        .wr_addr_a  (mux_wr_addr_a),
+        .wr_data_a  (mux_wr_data_a),
         .sum_out    (sum_out),
         .sum_valid  (sum_valid),
         .q8_out     (q8_out),

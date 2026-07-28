@@ -12,6 +12,10 @@
 //   S3: peek all 64 lanes back and compare byte for byte, proving the
 //       bits reached the REAL tile_buffer (peek shares the
 //       controller's read port; it is not a shadow copy)
+//   S5: same for the activation buffer (buf_sel = 1)
+//   S6: re-peek the weight tile afterwards - weight word v and
+//       activation word v share an address and differ only in
+//       buf_sel, so this catches a buf_sel bug in either direction
 //   S4: poke_err stayed clear - no commit was ever dropped
 //
 // A buffer word is N*DATA_WIDTH = 128 bits but POKE_DATA is 32, so a
@@ -30,6 +34,7 @@ module tb_poke_peek;
     localparam int VEC_W      = 4;
     localparam int WORD_W     = N * DATA_WIDTH;   // 128
     localparam int LANES      = WORD_W / 32;      // 4
+    localparam int NVECS      = 3;                // activation vectors per run
 
     localparam [5:0] ADDR_CTRL   = 6'h00;
     localparam [5:0] ADDR_STATUS = 6'h04;
@@ -141,7 +146,20 @@ module tb_poke_peek;
     // Golden weight tile: distinct bytes spanning both signs so a
     // lane-order or sign-extension bug cannot alias into a pass.
     //----------------------------------------------------------------
-    int W [16][16];
+    int W  [16][16];
+    int av [NVECS][16];
+
+    function automatic [WORD_W-1:0] pack_avec(input int v);
+        logic [WORD_W-1:0] word;
+        int b;
+        word = '0;
+        for (int e = 0; e < 16; e++) begin
+            b = av[v][e];
+            if (b < 0) b = b + 256;
+            word[e*DATA_WIDTH +: DATA_WIDTH] = b[7:0];
+        end
+        return word;
+    endfunction
 
     //----------------------------------------------------------------
     // AXI-Lite BFM (drive negedge, sample posedge)
@@ -265,6 +283,9 @@ module tb_poke_peek;
         for (int r = 0; r < 16; r++)
             for (int e = 0; e < 16; e++)
                 W[r][e] = ((r*3 + e*5) % 17) - 8;      // -8..8
+        for (int v = 0; v < NVECS; v++)
+            for (int e = 0; e < 16; e++)
+                av[v][e] = ((v*7 + e*3) % 13) - 6;     // -6..6
 
         repeat (3) @(negedge aclk);
         aresetn = 1;
@@ -306,6 +327,61 @@ module tb_poke_peek;
             if (bad == 0)
                 $display("PASS [S3] all %0d weight lanes peeked back byte-exact from the real buffer",
                          16*LANES);
+        end
+
+        //--- S5: poke activation vectors, peek them back --------------
+        // Same mechanism, the other buffer (POKE_ADDR[8] = 1). Peeked
+        // back BEFORE any go, so a later compute failure cannot be
+        // confused with a load failure.
+        for (int v = 0; v < NVECS; v++) begin
+            word = pack_avec(v);
+            poke_word(1, v, word);
+        end
+        begin
+            int bad;
+            bad = 0;
+            for (int v = 0; v < NVECS; v++) begin
+                word = pack_avec(v);
+                for (int lane = 0; lane < LANES; lane++) begin
+                    peek_elem(1, lane, v, rd);
+                    expect_lane = word[lane*32 +: 32];
+                    if (rd !== expect_lane) begin
+                        bad = bad + 1;
+                        errors++;
+                        $error("[S5] activation word %0d lane %0d = %h, expected %h",
+                               v, lane, rd, expect_lane);
+                    end
+                end
+            end
+            if (bad == 0)
+                $display("PASS [S5] %0d activation vectors poked and peeked back byte-exact",
+                         NVECS);
+        end
+
+        //--- S6: the two buffers are independent ----------------------
+        // Re-peek the weight tile after the activation pokes. Weight
+        // word v and activation word v share an address and differ
+        // only in buf_sel, so a buf_sel bug in either the poke commit
+        // or the peek read mux would show up here as the activation
+        // data having landed on top of the weight tile.
+        begin
+            int bad;
+            bad = 0;
+            for (int r = 0; r < 16; r++) begin
+                word = pack_row(r);
+                for (int lane = 0; lane < LANES; lane++) begin
+                    peek_elem(0, lane, r, rd);
+                    expect_lane = word[lane*32 +: 32];
+                    if (rd !== expect_lane) begin
+                        bad = bad + 1;
+                        errors++;
+                        $error("[S6] weight word %0d lane %0d = %h after activation pokes, expected %h",
+                               r, lane, rd, expect_lane);
+                    end
+                end
+            end
+            if (bad == 0)
+                $display("PASS [S6] weight tile intact after activation pokes (buf_sel is honoured both ways)");
         end
 
         //--- S4: no commit was dropped --------------------------------
