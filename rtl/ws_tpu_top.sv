@@ -32,7 +32,8 @@ module ws_tpu_top #(
     parameter int OUT_WIDTH   = 8,
     parameter int SCALE_WIDTH = 16,
     parameter int SHIFT_WIDTH = 5,
-    parameter int DEBUG_CAPTURE = 1
+    parameter int DEBUG_CAPTURE = 1,
+    parameter int MAX_N_VECS = 16
 )(
     // AXI-Lite subordinate (PS domain)
     input  logic        s_axi_aclk,
@@ -92,6 +93,16 @@ module ws_tpu_top #(
     if (VEC_W > 32) begin : gen_vecw_guard
         initial begin
             $error("ws_tpu_top: VEC_W (%0d) exceeds the 32-bit N_VECS register", VEC_W);
+            $fatal(1);
+        end
+    end
+
+    // A run may stream up to 2**VEC_W-1 vectors; the capture banks
+    // must be able to hold every one of them.
+    if (DEBUG_CAPTURE != 0 && MAX_N_VECS < (1 << VEC_W)) begin : gen_cap_depth_guard
+        initial begin
+            $error("ws_tpu_top: MAX_N_VECS (%0d) cannot hold a full VEC_W=%0d run (%0d vectors)",
+                   MAX_N_VECS, VEC_W, (1 << VEC_W));
             $fatal(1);
         end
     end
@@ -234,14 +245,54 @@ module ws_tpu_top #(
 
     assign peek_lane_val = dbg_rd_data[peek_lane_q*32 +: 32];
 
+    // buf_sel 2/3 read the capture banks. Same one-cycle read latency
+    // as the buffer path, so both land in peek_data_r at T+2.
+    logic        cap_rd_en, cap_rd_is_sum;
+    logic [31:0] cap_rd_data;
+
+    logic [VEC_W-1:0] peek_vec_sel;
+    logic [3:0]       peek_idx_sel;
+
+    assign cap_rd_en     = core_peek_valid && core_peek_addr[11];
+    assign cap_rd_is_sum = core_peek_addr[10];
+    assign peek_vec_sel  = core_peek_addr[VEC_W-1:0];
+    assign peek_idx_sel  = core_peek_addr[9:6];
+
     always_ff @(posedge core_clk) begin
         if (peek_v_q) begin
-            if (peek_sel_q[1]) peek_data_r <= 32'd0;
+            if (peek_sel_q[1]) peek_data_r <= cap_rd_data;
             else               peek_data_r <= peek_lane_val;
         end
     end
 
     assign core_peek_data = peek_data_r;
+
+    //----------------------------------------------------------------
+    // Result capture (DEBUG_CAPTURE only). Nothing else in the design
+    // stores results - the q8/sum edges are a live streaming tap - so
+    // this is what makes a complete result readable over AXI-Lite.
+    // Armed by core_go so every run rewrites its banks from vector 0.
+    //----------------------------------------------------------------
+    if (DEBUG_CAPTURE != 0) begin : gen_capture
+        ws_result_capture #(
+            .N(N), .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
+            .VEC_W(VEC_W), .MAX_N_VECS(MAX_N_VECS)
+        ) u_cap (
+            .clk       (core_clk),
+            .rst_n     (core_rst_n),
+            .arm       (core_go),
+            .sum_in    (sum_out),
+            .q8_in     (q8_out),
+            .val_in    (sum_valid),
+            .rd_en     (cap_rd_en),
+            .rd_is_sum (cap_rd_is_sum),
+            .rd_vec    (peek_vec_sel),
+            .rd_idx    (peek_idx_sel),
+            .rd_data   (cap_rd_data)
+        );
+    end else begin : gen_no_capture
+        assign cap_rd_data = 32'd0;
+    end
 
     ws_quant_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),

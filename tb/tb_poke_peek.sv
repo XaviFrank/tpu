@@ -266,6 +266,119 @@ module tb_poke_peek;
     endfunction
 
     //----------------------------------------------------------------
+    // Golden: the untiled reference. Result convention is
+    // y[v][j] = sum_i W[i][j] * a[v][i] (hosts store tiles
+    // transposed), with scale_mult=1 / shift=0 / relu off, so the
+    // INT8 answer is just the clamped INT32 sum - which is exactly
+    // what lets the two peeked streams cross-check each other.
+    //----------------------------------------------------------------
+    function automatic int golden_sum(input int v, input int j);
+        int y;
+        y = 0;
+        for (int i = 0; i < 16; i++)
+            y = y + W[i][j]*av[v][i];
+        return y;
+    endfunction
+
+    function automatic int clamp8(input int x);
+        int r;
+        r = x;
+        if (r > 127)  r = 127;
+        if (r < -128) r = -128;
+        return r;
+    endfunction
+
+    task automatic poll_done(input string name);
+        logic [31:0] v;
+        int n;
+        n = 0;
+        forever begin
+            axi_read(ADDR_STATUS, v);
+            if (v[1] === 1'b1) return;
+            n = n + 1;
+            if (n == POKE_POLL_MAX) begin
+                errors++;
+                $error("[%s] done never arrived (STATUS=%h)", name, v);
+                return;
+            end
+        end
+    endtask
+
+    // Trigger a run over the currently-poked data and check BOTH
+    // result streams against the untiled golden.
+    task automatic run_and_check(input string name);
+        logic [31:0] v;
+        logic [31:0] cfgword;
+        int bad_sum, bad_q8, got, exp;
+
+        cfgword    = '0;
+        cfgword[0] = 1'b1;                 // scale_mult = 1, shift = 0, relu off
+        axi_write(ADDR_NVECS, NVECS);
+        axi_write(ADDR_CFG,   cfgword);
+        repeat (PEEK_SETTLE_ACLKS) @(negedge aclk);
+
+        axi_write(ADDR_CTRL, 32'h1);
+        poll_done(name);
+        repeat (PEEK_SETTLE_ACLKS) @(negedge aclk);
+
+        // INT32 accumulator bank (buf_sel 3): one element per column
+        bad_sum = 0;
+        for (int vec = 0; vec < NVECS; vec++)
+            for (int j = 0; j < 16; j++) begin
+                peek_elem(3, j, vec, v);
+                got = v;                            // 32-bit two's complement
+                exp = golden_sum(vec, j);
+                if (got !== exp) begin
+                    bad_sum = bad_sum + 1;
+                    errors++;
+                    $error("[%s int32] vec %0d col %0d = %0d, expected %0d",
+                           name, vec, j, got, exp);
+                end
+            end
+        if (bad_sum == 0)
+            $display("PASS [%s] %0d INT32 sums peeked back exact vs the untiled golden",
+                     name, NVECS*16);
+
+        // INT8 q8 bank (buf_sel 2): four packed columns per element
+        bad_q8 = 0;
+        for (int vec = 0; vec < NVECS; vec++)
+            for (int lane = 0; lane < LANES; lane++) begin
+                peek_elem(2, lane, vec, v);
+                for (int k = 0; k < 4; k++) begin
+                    got = $signed(v[k*8 +: 8]);
+                    exp = clamp8(golden_sum(vec, lane*4 + k));
+                    if (got !== exp) begin
+                        bad_q8 = bad_q8 + 1;
+                        errors++;
+                        $error("[%s q8] vec %0d col %0d = %0d, expected %0d",
+                               name, vec, lane*4 + k, got, exp);
+                    end
+                end
+            end
+        if (bad_q8 == 0)
+            $display("PASS [%s] %0d INT8 results peeked back exact (= clamped INT32, streams agree)",
+                     name, NVECS*16);
+
+        // Capturing BOTH streams only proves anything if they differ.
+        // If every sum happened to fit in an INT8 the q8 check would
+        // pass without exercising requant at all, so require that the
+        // golden actually clamps somewhere - same degeneracy guard the
+        // tiling engine TB applies to its partial-vs-final check.
+        bad_q8 = 0;
+        for (int vec = 0; vec < NVECS; vec++)
+            for (int j = 0; j < 16; j++)
+                if (golden_sum(vec, j) != clamp8(golden_sum(vec, j)))
+                    bad_q8 = bad_q8 + 1;
+        if (bad_q8 == 0) begin
+            errors++;
+            $error("[%s] golden degenerate: no sum clamps, so the INT8 stream never diverges from the INT32 one",
+                   name);
+        end else
+            $display("PASS [%s] %0d of %0d results clamp - the two captured streams genuinely differ",
+                     name, bad_q8, NVECS*16);
+    endtask
+
+    //----------------------------------------------------------------
     // Main sequence
     //----------------------------------------------------------------
     logic [31:0] rd;
@@ -280,12 +393,16 @@ module tb_poke_peek;
         wr_en_w = 0; wr_addr_w = '0; wr_data_w = '0;
         wr_en_a = 0; wr_addr_a = '0; wr_data_a = '0;
 
+        // Chosen so the INT32 sums saturate in BOTH directions (27 of
+        // 48 above +127, 16 below -128): the INT8 stream must then
+        // differ from the INT32 one, which is what makes capturing
+        // both worth the area. S7's degeneracy check enforces this.
         for (int r = 0; r < 16; r++)
             for (int e = 0; e < 16; e++)
-                W[r][e] = ((r*3 + e*5) % 17) - 8;      // -8..8
+                W[r][e] = ((r*3 + e*5) % 15) - 7;      // -7..7
         for (int v = 0; v < NVECS; v++)
             for (int e = 0; e < 16; e++)
-                av[v][e] = ((v*7 + e*3) % 13) - 6;     // -6..6
+                av[v][e] = ((v*7 + e*3) % 14) - 3;     // -3..10
 
         repeat (3) @(negedge aclk);
         aresetn = 1;
@@ -383,6 +500,29 @@ module tb_poke_peek;
             if (bad == 0)
                 $display("PASS [S6] weight tile intact after activation pokes (buf_sel is honoured both ways)");
         end
+
+        //--- S7: run it, then peek the results back -------------------
+        run_and_check("S7 round 1");
+
+        //--- S8: a second, DIFFERENT tile+vector pair -----------------
+        // Proves the buffers do not retain stale state and that poke
+        // overwrites correctly rather than only working from reset.
+        for (int r = 0; r < 16; r++)
+            for (int e = 0; e < 16; e++)
+                W[r][e] = ((r*11 + e*7) % 11) - 5;      // different rule
+        for (int v = 0; v < NVECS; v++)
+            for (int e = 0; e < 16; e++)
+                av[v][e] = ((v*5 + e*9) % 14) - 2;      // also two-sided
+
+        for (int r = 0; r < 16; r++) begin
+            word = pack_row(r);
+            poke_word(0, r, word);
+        end
+        for (int v = 0; v < NVECS; v++) begin
+            word = pack_avec(v);
+            poke_word(1, v, word);
+        end
+        run_and_check("S8 round 2");
 
         //--- S4: no commit was dropped --------------------------------
         axi_read(ADDR_STATUS, rd);

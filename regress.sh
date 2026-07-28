@@ -68,7 +68,7 @@ run_tb tb_axi_lite_ctrl  rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv \
                          rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
-                         rtl/axi_lite_ctrl.sv rtl/ws_tpu_top.sv tb/tb_axi_lite_ctrl.sv
+                         rtl/axi_lite_ctrl.sv rtl/ws_result_capture.sv rtl/ws_tpu_top.sv tb/tb_axi_lite_ctrl.sv
 
 # --- N=16 chip-level checkpoint (ws_tpu_top at the synth parameterization) ---
 run_tb tb_ws_tpu_n16     rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
@@ -76,7 +76,7 @@ run_tb tb_ws_tpu_n16     rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv \
                          rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
-                         rtl/axi_lite_ctrl.sv rtl/ws_tpu_top.sv tb/tb_ws_tpu_n16.sv
+                         rtl/axi_lite_ctrl.sv rtl/ws_result_capture.sv rtl/ws_tpu_top.sv tb/tb_ws_tpu_n16.sv
 
 # --- WS tiling engine (multi-tile sweep over ws_quant_unit) ---
 run_tb tb_ws_tiling_engine rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
@@ -99,7 +99,7 @@ run_tb tb_poke_peek      rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/perf_counters.sv rtl/ws_perf_counters.sv \
                          rtl/requant.sv rtl/ws_quant_unit.sv \
                          rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
-                         rtl/axi_lite_ctrl.sv rtl/ws_tpu_top.sv tb/tb_poke_peek.sv
+                         rtl/axi_lite_ctrl.sv rtl/ws_result_capture.sv rtl/ws_tpu_top.sv tb/tb_poke_peek.sv
 
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
