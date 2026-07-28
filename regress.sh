@@ -101,5 +101,14 @@ run_tb tb_poke_peek      rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
                          rtl/axi_lite_ctrl.sv rtl/ws_result_capture.sv rtl/ws_tpu_top.sv tb/tb_poke_peek.sv
 
+# --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
+run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
+                         rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/perf_counters.sv rtl/ws_perf_counters.sv \
+                         rtl/requant.sv rtl/ws_quant_unit.sv \
+                         rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
+                         rtl/axi_lite_ctrl.sv rtl/ws_result_capture.sv \
+                         rtl/ws_tpu_top.sv tb/tb_debug_capture_off.sv
+
 [ $FAIL -eq 0 ] && echo "=== REGRESSION GREEN ===" || { echo "=== REGRESSION FAILED ==="; }
 exit $FAIL
