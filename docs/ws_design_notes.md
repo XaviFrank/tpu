@@ -165,23 +165,63 @@ identity-quant int8 + ReLU correct, busy = 53 (nv=1) and 56 (nv=4),
 cadence peak = min(n_vecs, N). All formulas held — see cycle-budget
 table above.
 
-**Synthesis predictions (written before the human's N=16 synth run):**
+**Synthesis predictions vs. measured (N=16 run closed out 2026-07-16):**
+
+Measured column is from the human's Vivado 2025.2 run, **top =
+`ws_tpu_top`**, device `xck26-sfvc784-2LV` (Kria K26), design state
+Fully Routed, `core_clk` constrained at 4.700 ns (212.8 MHz).
+Caveat on the LUT/FF rows: predictions were scoped to `ws_quant_unit`,
+but the measured numbers are whole-top (`ws_tpu_top` ⊃ axi_lite_ctrl +
+CDC + `ws_quant_unit`), so the top-level totals are an *upper bound* on
+the predicted quantity. No `report_utilization -hierarchical` was run,
+so the per-module split below is inferred where noted.
 
 | Quantity | Predicted N=16 | Basis | Measured |
 |---|---|---|---|
-| Array DSP | 256 (N²) | 1 fused DSP/PE (iteration 3) | *(pending)* |
-| Requant DSP | 32 (2 × 16 lanes) | confirmed 2/lane at N=4 | *(pending)* |
-| Total DSP | 288 | | *(pending)* |
-| u_array LUT | ~2,600 | ~10 LUT/PE × 256, scales N² | *(pending)* |
-| ws_quant_unit LUT | ~4,000 | array 2.6k + 4× requant + glue | *(pending)* |
-| ws_quant_unit FF | ~2,000 | skew Σ(i+1)·9b ≈ 1.2k + array ~640 | *(pending)* |
-| BRAM | 1 RAMB36-equiv (2×64×128 as RAMB18) | same packing as N=4 | *(pending)* |
-| WNS | within ~1 ns of N=4 | per-PE paths N-independent; RISK: load_mode/w_capture/valid broadcast fanout to 256 PEs | *(pending)* |
+| Array DSP | 256 (N²) | 1 fused DSP/PE (iteration 3) | **256** (288 total − 32 requant; see below) |
+| Requant DSP | 32 (2 × 16 lanes) | confirmed 2/lane at N=4 | **32** (32 distinct `gen_lane[*].u_rq` DSP instances named in DRC) |
+| Total DSP | 288 | | **288** (23.08% of 1248) — exact |
+| u_array LUT | ~2,600 | ~10 LUT/PE × 256, scales N² | *(not separable — no hierarchical report)* |
+| ws_quant_unit LUT | ~4,000 | array 2.6k + 4× requant + glue | **≤ 3,804** whole-top CLB LUTs (3,708 logic + 96 SRL), 3.25% — conservative by ≥5% |
+| ws_quant_unit FF | ~2,000 | skew Σ(i+1)·9b ≈ 1.2k + array ~640 | **≤ 2,639** whole-top CLB registers, 1.13% |
+| BRAM | 1 RAMB36-equiv (2×64×128 as RAMB18) | same packing as N=4 | **4 RAMB36E2** — *prediction missed* (see width note) |
+| WNS | within ~1 ns of N=4 | per-PE paths N-independent; RISK: load_mode/w_capture/valid broadcast fanout to 256 PEs | **+0.559 ns MET** at 4.700 ns; WHS **+0.055 ns**; TNS/THS 0.000, 0 failing endpoints |
 
-If WNS slips well past 1 ns, the broadcast fanout is the first suspect —
-the fix direction is registered fanout duplication (a control-tree
-pipeline stage), which would add 1 cycle to LOAD and shift feed timing;
-flag before implementing.
+**BRAM — why the 4× miss.** The prediction counted bits (2 × 64 × 128 b
+= 16 Kb, under one RAMB36's 36 Kb) but ignored port width. A RAMB36E2
+tops out at 72 bits wide in SDP mode, so a 128-bit word needs two
+RAMB36s side by side, used shallow (64 of 512 rows). Two buffers × 2 =
+**4**. The packing rule is width-driven, not capacity-driven:
+`ceil(N*DATA_WIDTH / 72)` RAMB36 per buffer. At N=4 (32-bit words) one
+tile fits a single primitive, which is why N=4 didn't expose this.
+
+**The broadcast-fanout risk did not materialize as a violation, but it
+is the shape of the critical path.** Worst setup path is
+`u_array/gen_row[15].gen_col[7].u_pe/valid_out_reg/C` →
+`gen_row[11].gen_col[12].u_pe/sum_reg_reg/.../RSTM`: data path 3.782 ns
+of which **logic 0.118 ns (3.1%) and route 3.664 ns (96.9%), 0 logic
+levels**. Second-worst (+0.607 ns) is the controller FSM state register
+into a PE DSP clock-enable, 2 logic levels. Both are long-haul control
+broadcasts across the 16×16 mesh — fmax here is placement/wire-distance
+bound, not logic-depth bound. So the pre-registered fix direction
+(registered fanout duplication / a control-tree pipeline stage, +1 LOAD
+cycle) remains the correct lever if more fmax is wanted; shortening
+logic would buy essentially nothing.
+
+Achieved fmax ≈ **241 MHz** (4.700 − 0.559 = 4.141 ns) at this
+placement. `s_axi_aclk` at 100 MHz is slack-rich (WNS +7.371 ns).
+Total on-chip power 0.555 W (0.266 dynamic / 0.290 static), Tj 26.3 °C.
+Fully routed, 0 nets with routing errors.
+
+**DRC: 0 errors, 145 warnings, all expected.** 80 DPIP-2 (DSP input not
+pipelined) + 32 DPOP-3 (PREG) + 32 DPOP-4 (MREG), concentrated on the
+32 requant DSPs plus 16 array PE output-register checks — Vivado
+advising deeper DSP pipelining for fmax, which the current single-cycle
+requant contract deliberately declines. 1 RTSTAT-10: 179 nets with no
+routable loads, all `u_ctrl/u_hs_cfg/q8_out[*]` — **expected**, and a
+direct consequence of the documented contract that q8/`res_*` are
+core-domain streams with no AXI readback; they will acquire loads when
+the DMA path lands.
 
 ## Conventions
 
