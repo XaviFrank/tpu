@@ -31,7 +31,8 @@ module ws_tpu_top #(
     parameter int VEC_W       = 4,
     parameter int OUT_WIDTH   = 8,
     parameter int SCALE_WIDTH = 16,
-    parameter int SHIFT_WIDTH = 5
+    parameter int SHIFT_WIDTH = 5,
+    parameter int DEBUG_CAPTURE = 1
 )(
     // AXI-Lite subordinate (PS domain)
     input  logic        s_axi_aclk,
@@ -120,9 +121,34 @@ module ws_tpu_top #(
     logic [3:0] unused_n_tiles;
     assign cfg_err_zero = 1'b0;
 
+    //----------------------------------------------------------------
+    // Debug poke/peek nets (see axi_lite_ctrl's POKE/PEEK contract).
+    //----------------------------------------------------------------
+    localparam int WORD_W = N * DATA_WIDTH;
+    localparam int BUF_AW = $clog2(DEPTH);
+
+    logic                  core_poke_valid, core_poke_sel;
+    logic [BUF_AW-1:0]     core_poke_addr;
+    logic [WORD_W-1:0]     core_poke_data;
+    logic [11:0]           core_peek_addr;
+    logic                  core_peek_valid;
+    logic [31:0]           core_peek_data;
+
+    logic                  dbg_rd_en, dbg_rd_sel;
+    logic [BUF_AW-1:0]     dbg_rd_addr;
+    logic [WORD_W-1:0]     dbg_rd_data;
+
     axi_lite_ctrl #(
-        .VEC_W(VEC_W), .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
+        .VEC_W(VEC_W), .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH),
+        .BUF_DEPTH(DEPTH), .BUF_WORD(WORD_W)
     ) u_ctrl (
+        .core_poke_valid (core_poke_valid),
+        .core_poke_sel   (core_poke_sel),
+        .core_poke_addr  (core_poke_addr),
+        .core_poke_data  (core_poke_data),
+        .core_peek_addr  (core_peek_addr),
+        .core_peek_valid (core_peek_valid),
+        .core_peek_data  (core_peek_data),
         .s_axi_aclk      (s_axi_aclk),
         .s_axi_aresetn   (s_axi_aresetn),
         .s_axi_awvalid   (s_axi_awvalid),
@@ -157,11 +183,71 @@ module ws_tpu_top #(
         .core_perf_data  (core_perf_data)
     );
 
+    //----------------------------------------------------------------
+    // Poke write mux. The top-level wr_* ports (TB today, DMA later)
+    // WIN over poke, so every existing TB that drives them directly
+    // behaves byte-for-byte as before. On hardware they are tied off
+    // and poke is the only writer.
+    //----------------------------------------------------------------
+    logic              poke_en_w;
+    logic              mux_wr_en_w;
+    logic [BUF_AW-1:0] mux_wr_addr_w;
+    logic [WORD_W-1:0] mux_wr_data_w;
+
+    assign poke_en_w     = core_poke_valid && !core_poke_sel;
+    assign mux_wr_en_w   = wr_en_w || poke_en_w;
+    assign mux_wr_addr_w = wr_en_w ? wr_addr_w : core_poke_addr;
+    assign mux_wr_data_w = wr_en_w ? wr_data_w : core_poke_data;
+
+    //----------------------------------------------------------------
+    // Peek read pipeline: registered on both sides so the lane mux
+    // never sits on a combinational path out of the buffers. Request
+    // at T, buffer rd_data at T+1, result registered at T+2;
+    // axi_lite_ctrl samples at T+3. buf_sel 2/3 (result banks) return
+    // 0 until the capture buffer lands.
+    //----------------------------------------------------------------
+    logic [1:0]  peek_lane_q, peek_sel_q;
+    logic        peek_v_q;
+    logic [31:0] peek_data_r;
+    logic [31:0] peek_lane_val;
+
+    assign dbg_rd_en   = core_peek_valid && !core_peek_addr[11];
+    assign dbg_rd_sel  = core_peek_addr[10];
+    assign dbg_rd_addr = core_peek_addr[BUF_AW-1:0];
+
+    always_ff @(posedge core_clk or negedge core_rst_n) begin
+        if (!core_rst_n) peek_v_q <= 1'b0;
+        else             peek_v_q <= core_peek_valid;
+    end
+
+    always_ff @(posedge core_clk) begin
+        if (core_peek_valid) begin
+            peek_lane_q <= core_peek_addr[7:6];
+            peek_sel_q  <= core_peek_addr[11:10];
+        end
+    end
+
+    assign peek_lane_val = dbg_rd_data[peek_lane_q*32 +: 32];
+
+    always_ff @(posedge core_clk) begin
+        if (peek_v_q) begin
+            if (peek_sel_q[1]) peek_data_r <= 32'd0;
+            else               peek_data_r <= peek_lane_val;
+        end
+    end
+
+    assign core_peek_data = peek_data_r;
+
     ws_quant_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH),
-        .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
+        .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH),
+        .DEBUG_CAPTURE(DEBUG_CAPTURE)
     ) u_core (
+        .dbg_rd_en   (dbg_rd_en),
+        .dbg_rd_sel  (dbg_rd_sel),
+        .dbg_rd_addr (dbg_rd_addr),
+        .dbg_rd_data (dbg_rd_data),
         .clk        (core_clk),
         .rst_n      (core_rst_n),
         .go         (core_go),
@@ -172,9 +258,9 @@ module ws_tpu_top #(
         .perf_clear (perf_clear),
         .perf_addr  (core_perf_addr),
         .perf_data  (core_perf_data),
-        .wr_en_w    (wr_en_w),
-        .wr_addr_w  (wr_addr_w),
-        .wr_data_w  (wr_data_w),
+        .wr_en_w    (mux_wr_en_w),
+        .wr_addr_w  (mux_wr_addr_w),
+        .wr_data_w  (mux_wr_data_w),
         .wr_en_a    (wr_en_a),
         .wr_addr_a  (wr_addr_a),
         .wr_data_a  (wr_data_a),

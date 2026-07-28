@@ -137,10 +137,45 @@ module ws_tpu_tiled_top #(
     logic [$clog2(DEPTH/K)-1:0]    w_tile_idx;
     logic [$clog2(DEPTH)-1:0]      a_base;
 
+    //----------------------------------------------------------------
+    // Debug poke/peek is INERT on this top. The smoke-test bring-up
+    // path lives on ws_tpu_top (single-tile), which is where a full
+    // tile can be poked and a complete result peeked back; poking a
+    // multi-tile sweep by hand is not a reasonable use of it, and
+    // leaving it out keeps this top's core-domain fanout unchanged.
+    // The ports are still connected (never left floating) and
+    // DEBUG_CAPTURE=0 removes the read mux from u_core entirely.
+    //----------------------------------------------------------------
+    localparam int WORD_W = N * DATA_WIDTH;
+    localparam int BUF_AW = $clog2(DEPTH);
+
+    logic              poke_valid_nc, poke_sel_nc;
+    logic [BUF_AW-1:0] poke_addr_nc;
+    logic [WORD_W-1:0] poke_data_nc;
+    logic [11:0]       peek_addr_nc;
+    logic              peek_valid_nc;
+    logic [31:0]       peek_data_zero;
+
+    logic              dbg_rd_en_off, dbg_rd_sel_off;
+    logic [BUF_AW-1:0] dbg_rd_addr_off;
+    logic [WORD_W-1:0] dbg_rd_data_nc;
+
+    assign peek_data_zero  = 32'd0;
+    assign dbg_rd_en_off   = 1'b0;
+    assign dbg_rd_sel_off  = 1'b0;
+    assign dbg_rd_addr_off = '0;
+
     axi_lite_ctrl #(
         .VEC_W(VEC_W), .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH),
-        .TILE_W(TILE_W)
+        .TILE_W(TILE_W), .BUF_DEPTH(DEPTH), .BUF_WORD(WORD_W)
     ) u_ctrl (
+        .core_poke_valid (poke_valid_nc),
+        .core_poke_sel   (poke_sel_nc),
+        .core_poke_addr  (poke_addr_nc),
+        .core_poke_data  (poke_data_nc),
+        .core_peek_addr  (peek_addr_nc),
+        .core_peek_valid (peek_valid_nc),
+        .core_peek_data  (peek_data_zero),
         .s_axi_aclk      (s_axi_aclk),
         .s_axi_aresetn   (s_axi_aresetn),
         .s_axi_awvalid   (s_axi_awvalid),
@@ -209,8 +244,13 @@ module ws_tpu_tiled_top #(
     ws_quant_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH),
-        .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
+        .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH),
+        .DEBUG_CAPTURE(0)
     ) u_core (
+        .dbg_rd_en   (dbg_rd_en_off),
+        .dbg_rd_sel  (dbg_rd_sel_off),
+        .dbg_rd_addr (dbg_rd_addr_off),
+        .dbg_rd_data (dbg_rd_data_nc),
         .clk        (core_clk),
         .rst_n      (core_rst_n),
         .go         (inner_go),

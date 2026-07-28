@@ -47,10 +47,23 @@ module tb_ws_quant_unit;
 
     int errors = 0;
 
+    // debug read port (unused here - tied off so the ws_unit mux never
+    // sees a floating input)
+    logic                     dbg_rd_en, dbg_rd_sel;
+    logic [$clog2(DEPTH)-1:0] dbg_rd_addr;
+    logic [N*DATA_WIDTH-1:0]  dbg_rd_data;
+    assign dbg_rd_en   = 1'b0;
+    assign dbg_rd_sel  = 1'b0;
+    assign dbg_rd_addr = '0;
+
     ws_quant_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH)
     ) dut (
+        .dbg_rd_en   (dbg_rd_en),
+        .dbg_rd_sel  (dbg_rd_sel),
+        .dbg_rd_addr (dbg_rd_addr),
+        .dbg_rd_data (dbg_rd_data),
         .clk        (clk),
         .rst_n      (rst_n),
         .go         (go),

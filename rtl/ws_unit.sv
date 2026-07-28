@@ -18,12 +18,13 @@
 //   (y = W_loaded^T * a; hosts store weight tiles transposed).
 //====================================================================
 module ws_unit #(
-    parameter int N          = 4,
-    parameter int K          = 4,
-    parameter int DATA_WIDTH = 8,
-    parameter int ACC_WIDTH  = 32,
-    parameter int DEPTH      = 64,
-    parameter int VEC_W      = 4
+    parameter int N             = 4,
+    parameter int K             = 4,
+    parameter int DATA_WIDTH    = 8,
+    parameter int ACC_WIDTH     = 32,
+    parameter int DEPTH         = 64,
+    parameter int VEC_W         = 4,
+    parameter int DEBUG_CAPTURE = 1
 )(
     input  logic                          clk,
     input  logic                          rst_n,
@@ -47,6 +48,13 @@ module ws_unit #(
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_a,
     input  logic [N*DATA_WIDTH-1:0]       wr_data_a,
 
+    // debug read port (DEBUG_CAPTURE only): shares the controller's
+    // read port through the mux below - see the mux comment.
+    input  logic                          dbg_rd_en,
+    input  logic                          dbg_rd_sel,   // 0=weight 1=activation
+    input  logic [$clog2(DEPTH)-1:0]      dbg_rd_addr,
+    output logic [N*DATA_WIDTH-1:0]       dbg_rd_data,
+
     // bottom-edge results (continuous, column-skewed)
     output logic signed [ACC_WIDTH-1:0]   sum_out   [N],
     output logic                          sum_valid [N]
@@ -58,6 +66,46 @@ module ws_unit #(
     logic                         rd_en_w, rd_en_a;
     logic [$clog2(DEPTH)-1:0]     rd_addr_w, rd_addr_a;
     logic [WORD_WIDTH-1:0]        rd_data_w, rd_data_a;
+
+    //----------------------------------------------------------------
+    // Debug read mux (DEBUG_CAPTURE). tile_buffer's header forbids a
+    // second read port - BRAM inference is fragile - so the debug read
+    // does NOT add one. It muxes in FRONT of the existing port, which
+    // leaves tile_buffer untouched with exactly one rd_en/rd_addr and
+    // keeps BRAM inference intact. ws_controller is untouched too.
+    //   The controller wins unconditionally: a peek issued mid-run is
+    // simply suppressed, so it returns stale/garbage data but CANNOT
+    // disturb a run. Host contract is therefore "peek while idle".
+    //   rd_data lands one cycle after rd_en, so which buffer answered
+    // is remembered for one cycle to steer the return mux.
+    //----------------------------------------------------------------
+    logic                  buf_rd_en_w, buf_rd_en_a;
+    logic [$clog2(DEPTH)-1:0] buf_rd_addr_w, buf_rd_addr_a;
+    logic                  dbg_fire_w, dbg_fire_a;
+    logic                  dbg_sel_q;
+
+    if (DEBUG_CAPTURE != 0) begin : gen_dbg_rd
+        assign dbg_fire_w = dbg_rd_en && !dbg_rd_sel && !rd_en_w;
+        assign dbg_fire_a = dbg_rd_en &&  dbg_rd_sel && !rd_en_a;
+
+        assign buf_rd_en_w   = rd_en_w || dbg_fire_w;
+        assign buf_rd_en_a   = rd_en_a || dbg_fire_a;
+        assign buf_rd_addr_w = rd_en_w ? rd_addr_w : dbg_rd_addr;
+        assign buf_rd_addr_a = rd_en_a ? rd_addr_a : dbg_rd_addr;
+
+        always_ff @(posedge clk) dbg_sel_q <= dbg_rd_sel;
+
+        assign dbg_rd_data = dbg_sel_q ? rd_data_a : rd_data_w;
+    end else begin : gen_no_dbg_rd
+        assign dbg_fire_w    = 1'b0;
+        assign dbg_fire_a    = 1'b0;
+        assign buf_rd_en_w   = rd_en_w;
+        assign buf_rd_en_a   = rd_en_a;
+        assign buf_rd_addr_w = rd_addr_w;
+        assign buf_rd_addr_a = rd_addr_a;
+        assign dbg_sel_q     = 1'b0;
+        assign dbg_rd_data   = '0;
+    end
 
     // controller <-> datapath nets
     logic                         load_mode, w_capture, valid_feed;
@@ -85,8 +133,8 @@ module ws_unit #(
         .wr_en   (wr_en_w),
         .wr_addr (wr_addr_w),
         .wr_data (wr_data_w),
-        .rd_en   (rd_en_w),
-        .rd_addr (rd_addr_w),
+        .rd_en   (buf_rd_en_w),
+        .rd_addr (buf_rd_addr_w),
         .rd_data (rd_data_w)
     );
 
@@ -97,8 +145,8 @@ module ws_unit #(
         .wr_en   (wr_en_a),
         .wr_addr (wr_addr_a),
         .wr_data (wr_data_a),
-        .rd_en   (rd_en_a),
-        .rd_addr (rd_addr_a),
+        .rd_en   (buf_rd_en_a),
+        .rd_addr (buf_rd_addr_a),
         .rd_data (rd_data_a)
     );
 

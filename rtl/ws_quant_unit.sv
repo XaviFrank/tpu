@@ -25,7 +25,8 @@ module ws_quant_unit #(
     parameter int VEC_W       = 4,
     parameter int OUT_WIDTH   = 8,
     parameter int SCALE_WIDTH = 16,
-    parameter int SHIFT_WIDTH = 5
+    parameter int SHIFT_WIDTH = 5,
+    parameter int DEBUG_CAPTURE = 1
 )(
     input  logic                          clk,
     input  logic                          rst_n,
@@ -50,6 +51,12 @@ module ws_quant_unit #(
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_a,
     input  logic [N*DATA_WIDTH-1:0]       wr_data_a,
 
+    // debug read port (pass-through to ws_unit's buffer read mux)
+    input  logic                          dbg_rd_en,
+    input  logic                          dbg_rd_sel,
+    input  logic [$clog2(DEPTH)-1:0]      dbg_rd_addr,
+    output logic [N*DATA_WIDTH-1:0]       dbg_rd_data,
+
     // raw bottom-edge results (pass-through, column-skewed)
     output logic signed [ACC_WIDTH-1:0]   sum_out   [N],
     output logic                          sum_valid [N],
@@ -66,8 +73,12 @@ module ws_quant_unit #(
 
     ws_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
-        .DEPTH(DEPTH), .VEC_W(VEC_W)
+        .DEPTH(DEPTH), .VEC_W(VEC_W), .DEBUG_CAPTURE(DEBUG_CAPTURE)
     ) u_ws (
+        .dbg_rd_en   (dbg_rd_en),
+        .dbg_rd_sel  (dbg_rd_sel),
+        .dbg_rd_addr (dbg_rd_addr),
+        .dbg_rd_data (dbg_rd_data),
         .clk        (clk),
         .rst_n      (rst_n),
         .go         (go),
