@@ -99,8 +99,33 @@ set_clock_groups -asynchronous \
 #
 # 1. report_clocks
 #    Exactly one definition per physical clock. No core_clk or
-#    s_axi_aclk of ours alongside the PS clocks. Confirm the core
-#    clock's period is the intended 4.700 ns, not a 10.000 ns default.
+#    s_axi_aclk of ours alongside the PS clocks.
+#
+#    OBSERVED SIGNATURE WHEN THE FOLLOW-UP BELOW IS STILL UNDONE
+#    (routed 2026-07-29, ws_tpu_system_wrapper): the Clock Summary
+#    lists FOUR clocks where there should be two -
+#      clk_pl_0    10.000 ns   (real, PS)
+#      clk_pl_1     5.000 ns   (real, PS)
+#      core_clk     4.700 ns   (OURS - duplicate of clk_pl_1)
+#      s_axi_aclk  10.000 ns   (OURS - duplicate of clk_pl_0)
+#    Vivado names it directly in TIMING-4 ("core_clk is defined
+#    downstream of clock clk_pl_1") and TIMING-27 (created on pin
+#    ws_tpu_top_0/inst/core_clk). Each physical clock carries two
+#    unrelated definitions, so Vivado times each net against itself
+#    and cannot relate the edges.
+#
+#    WHAT THAT LOOKS LIKE DOWNSTREAM, so it is not misdiagnosed:
+#    every failing endpoint is INTER-clock between a duplicate pair,
+#    while intra-clock timing is completely clean (core_clk +0.362 ns
+#    over 8340 endpoints, 0 failing). The failures concentrate on
+#    reset paths from proc_sys_reset_0 - 407 Recovery checks on /CLR
+#    pins plus 4 Setup checks on /CE pins - which reads exactly like
+#    an asynchronous reset crossing needing a false path. It is NOT.
+#    proc_sys_reset_0 is clocked by clk_pl_1, which IS core_clk's
+#    physical clock, so those are ordinary same-domain synchronous
+#    reset paths. A set_false_path there would mask a legitimate
+#    recovery/removal check and leave the duplication in place.
+#    Fix the redefinition; do not constrain around it.
 #
 # 2. report_clock_interaction
 #    The core and AXI domains must show as "Asynchronous Groups", not
