@@ -245,23 +245,27 @@ module ws_tpu_top #(
 
     assign peek_lane_val = dbg_rd_data[peek_lane_q*32 +: 32];
 
-    // buf_sel 2/3 read the capture banks. Same one-cycle read latency
-    // as the buffer path, so both land in peek_data_r at T+2.
-    logic        cap_rd_en, cap_rd_is_sum;
+    // buf_sel 3 reads the INT32 capture bank; same one-cycle read
+    // latency as the buffer path, so both land in peek_data_r at T+2.
+    // buf_sel 2 (INT8) reads 0 - see the capture module header: that
+    // stream cannot be captured synchronously at this clock, so the
+    // host requantizes the INT32 values itself.
+    logic        cap_rd_en;
     logic [31:0] cap_rd_data;
 
     logic [VEC_W-1:0] peek_vec_sel;
     logic [3:0]       peek_idx_sel;
 
-    assign cap_rd_en     = core_peek_valid && core_peek_addr[11];
-    assign cap_rd_is_sum = core_peek_addr[10];
+    assign cap_rd_en     = core_peek_valid && core_peek_addr[11]
+                                           && core_peek_addr[10];
     assign peek_vec_sel  = core_peek_addr[VEC_W-1:0];
     assign peek_idx_sel  = core_peek_addr[9:6];
 
     always_ff @(posedge core_clk) begin
         if (peek_v_q) begin
-            if (peek_sel_q[1]) peek_data_r <= cap_rd_data;
-            else               peek_data_r <= peek_lane_val;
+            if (peek_sel_q == 2'd2)      peek_data_r <= 32'd0;
+            else if (peek_sel_q == 2'd3) peek_data_r <= cap_rd_data;
+            else                         peek_data_r <= peek_lane_val;
         end
     end
 
@@ -275,17 +279,15 @@ module ws_tpu_top #(
     //----------------------------------------------------------------
     if (DEBUG_CAPTURE != 0) begin : gen_capture
         ws_result_capture #(
-            .N(N), .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
+            .N(N), .ACC_WIDTH(ACC_WIDTH),
             .VEC_W(VEC_W), .MAX_N_VECS(MAX_N_VECS)
         ) u_cap (
             .clk       (core_clk),
             .rst_n     (core_rst_n),
             .arm       (core_go),
             .sum_in    (sum_out),
-            .q8_in     (q8_out),
             .val_in    (sum_valid),
             .rd_en     (cap_rd_en),
-            .rd_is_sum (cap_rd_is_sum),
             .rd_vec    (peek_vec_sel),
             .rd_idx    (peek_idx_sel),
             .rd_data   (cap_rd_data)

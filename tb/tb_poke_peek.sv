@@ -339,31 +339,43 @@ module tb_poke_peek;
             $display("PASS [%s] %0d INT32 sums peeked back exact vs the untiled golden",
                      name, NVECS*16);
 
-        // INT8 q8 bank (buf_sel 2): four packed columns per element
+        // buf_sel 2 is reserved and must read 0. The INT8 stream is
+        // not captured - the array->requant->flop chain cannot close
+        // at 4.7ns (see the capture module header) - so this pins the
+        // documented behaviour rather than leaving it to drift.
+        peek_elem(2, 0, 0, v);
+        if (v !== 32'd0) begin
+            errors++;
+            $error("[%s] PEEK buf_sel 2 (reserved) = %h, expected 0", name, v);
+        end else
+            $display("PASS [%s] PEEK buf_sel 2 reads 0 (INT8 not captured, host requantizes)",
+                     name);
+
+        // Host-side requant, which is exactly what a PYNQ driver does
+        // with the INT32 readback. This is a HOST computation, not a
+        // hardware check - the hardware evidence is the INT32 compare
+        // above; requant itself is covered by tb_requant's vectors.
         bad_q8 = 0;
         for (int vec = 0; vec < NVECS; vec++)
-            for (int lane = 0; lane < LANES; lane++) begin
-                peek_elem(2, lane, vec, v);
-                for (int k = 0; k < 4; k++) begin
-                    got = $signed(v[k*8 +: 8]);
-                    exp = clamp8(golden_sum(vec, lane*4 + k));
-                    if (got !== exp) begin
-                        bad_q8 = bad_q8 + 1;
-                        errors++;
-                        $error("[%s q8] vec %0d col %0d = %0d, expected %0d",
-                               name, vec, lane*4 + k, got, exp);
-                    end
+            for (int j = 0; j < 16; j++) begin
+                peek_elem(3, j, vec, v);
+                got = clamp8($signed(v));
+                exp = clamp8(golden_sum(vec, j));
+                if (got !== exp) begin
+                    bad_q8 = bad_q8 + 1;
+                    errors++;
+                    $error("[%s host-int8] vec %0d col %0d = %0d, expected %0d",
+                           name, vec, j, got, exp);
                 end
             end
         if (bad_q8 == 0)
-            $display("PASS [%s] %0d INT8 results peeked back exact (= clamped INT32, streams agree)",
+            $display("PASS [%s] %0d host-requantized INT8 values match the golden",
                      name, NVECS*16);
 
-        // Capturing BOTH streams only proves anything if they differ.
-        // If every sum happened to fit in an INT8 the q8 check would
-        // pass without exercising requant at all, so require that the
-        // golden actually clamps somewhere - same degeneracy guard the
-        // tiling engine TB applies to its partial-vs-final check.
+        // The host-side clamp only means anything if the sums actually
+        // leave INT8 range; otherwise clamping is never exercised.
+        // Same degeneracy discipline as the tiling engine TB's
+        // partial-vs-final check.
         bad_q8 = 0;
         for (int vec = 0; vec < NVECS; vec++)
             for (int j = 0; j < 16; j++)
@@ -371,10 +383,10 @@ module tb_poke_peek;
                     bad_q8 = bad_q8 + 1;
         if (bad_q8 == 0) begin
             errors++;
-            $error("[%s] golden degenerate: no sum clamps, so the INT8 stream never diverges from the INT32 one",
+            $error("[%s] golden degenerate: no sum leaves INT8 range, so clamping is never exercised",
                    name);
         end else
-            $display("PASS [%s] %0d of %0d results clamp - the two captured streams genuinely differ",
+            $display("PASS [%s] %0d of %0d sums leave INT8 range - clamping is genuinely exercised",
                      name, bad_q8, NVECS*16);
     endtask
 

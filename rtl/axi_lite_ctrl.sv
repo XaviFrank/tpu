@@ -52,8 +52,18 @@
 //   0x24 POKE_DATA   W  32-bit lane value; a write with lane ==
 //                       BUF_WORD/32-1 COMMITS the assembled word
 //   0x28 PEEK_ADDR   W  [5:0] idx0, [9:6] idx1, [11:10] buf_sel
-//                       (0=weight, 1=activation, 2=res q8,
+//                       (0=weight, 1=activation, 2=RESERVED reads 0,
 //                       3=res INT32); readback supported
+//                       buf_sel 2 was the INT8 result bank. It is NOT
+//                       captured: measured on the routed build, the
+//                       array->requant->flop chain is 8.355ns with
+//                       4.8-5.0ns of that LOGIC alone against a
+//                       4.700ns period, so it cannot close at this
+//                       clock (and cannot be multicycled - q8_valid
+//                       is asserted on back-to-back cycles). Hosts
+//                       requantize the INT32 values from buf_sel 3.
+//                       The encoding is left reserved rather than
+//                       renumbered so the map stays stable.
 //   0x2C PEEK_DATA   R  selected 32-bit element; refreshed once per
 //                       PEEK_ADDR write (same ~20 aclk budget as
 //                       PERF_DATA - write address, wait, then read)
