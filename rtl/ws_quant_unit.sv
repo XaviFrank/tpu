@@ -26,7 +26,8 @@ module ws_quant_unit #(
     parameter int OUT_WIDTH   = 8,
     parameter int SCALE_WIDTH = 16,
     parameter int SHIFT_WIDTH = 5,
-    parameter int DEBUG_CAPTURE = 1
+    parameter int DEBUG_CAPTURE = 1,
+    parameter int RQ_PIPE     = 0
 )(
     input  logic                          clk,
     input  logic                          rst_n,
@@ -99,11 +100,28 @@ module ws_quant_unit #(
         .sum_valid  (sum_valid)
     );
 
-    // one requant lane per column, on the live stream
+    //----------------------------------------------------------------
+    // One requant lane per column, on the live stream.
+    //
+    // RQ_PIPE sets those lanes' PIPE_STAGES. At the default 0 the
+    // lanes are combinational and q8_valid is sum_valid straight
+    // through, exactly as before - which is what tb_ws_quant_unit,
+    // tb_ws_n16, tb_ws_tiling_engine and ws_tpu_tiled_top all keep.
+    // ws_tpu_top raises it, because its q8 has a synchronous consumer
+    // (ws_result_capture) and that chain cannot close at 4.7ns
+    // unpipelined - see requant.sv's header.
+    //
+    // The valid is delayed by exactly RQ_PIPE so each q8 value stays
+    // paired with its own valid; a mismatch here would silently
+    // misalign every downstream consumer rather than fail loudly.
+    //----------------------------------------------------------------
+    logic [1:0] vpipe [N];
+
     for (genvar j = 0; j < N; j++) begin : gen_lane
         requant #(
             .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
-            .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
+            .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH),
+            .PIPE_STAGES(RQ_PIPE)
         ) u_rq (
             .clk        (clk),
             .acc_in     (sum_out[j]),
@@ -113,7 +131,26 @@ module ws_quant_unit #(
             .out        (q8_out[j])
         );
 
-        assign q8_valid[j] = sum_valid[j];
+        // valid pipe (control: async reset). Two stages exist
+        // unconditionally; RQ_PIPE selects the tap, so the RQ_PIPE=0
+        // path below never reads them.
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                vpipe[j][0] <= 1'b0;
+                vpipe[j][1] <= 1'b0;
+            end else begin
+                vpipe[j][0] <= sum_valid[j];
+                vpipe[j][1] <= vpipe[j][0];
+            end
+        end
+
+        if (RQ_PIPE == 0) begin : gen_v_comb
+            assign q8_valid[j] = sum_valid[j];
+        end else if (RQ_PIPE == 1) begin : gen_v_p1
+            assign q8_valid[j] = vpipe[j][0];
+        end else begin : gen_v_p2
+            assign q8_valid[j] = vpipe[j][1];
+        end
     end
 
 endmodule

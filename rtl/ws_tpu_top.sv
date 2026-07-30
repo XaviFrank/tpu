@@ -44,7 +44,8 @@ module ws_tpu_top #(
     parameter int SCALE_WIDTH = 16,
     parameter int SHIFT_WIDTH = 5,
     parameter int DEBUG_CAPTURE = 1,
-    parameter int MAX_N_VECS = 16
+    parameter int MAX_N_VECS = 16,
+    parameter int RQ_PIPE = 2
 )(
     // AXI-Lite subordinate (PS domain)
     input  logic        s_axi_aclk,
@@ -311,7 +312,7 @@ module ws_tpu_top #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH),
         .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH),
-        .DEBUG_CAPTURE(DEBUG_CAPTURE)
+        .DEBUG_CAPTURE(DEBUG_CAPTURE), .RQ_PIPE(RQ_PIPE)
     ) u_core (
         .dbg_rd_en   (dbg_rd_en),
         .dbg_rd_sel  (dbg_rd_sel),

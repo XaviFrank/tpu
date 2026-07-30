@@ -150,13 +150,25 @@ module tb_ws_tpu_n16;
     int got8    [16][4];
     int got_raw [16][4];
     int got_cnt [16];
+    int raw_cnt [16];
 
+    // The raw and q8 streams are collected on their OWN valids and
+    // with their OWN counters. They used to share both, which was
+    // correct only while q8_valid was sum_valid straight through. With
+    // ws_tpu_top at RQ_PIPE=2 the requant lanes are pipelined, so q8
+    // trails its INT32 source by 2 cycles and one shared q8_valid-gated
+    // block would sample sum_out two cycles late - collecting the
+    // wrong sums and dropping the last two. Per-stream valids make the
+    // collector independent of the lane latency instead of encoding it.
     always @(posedge cclk) begin
         if (crst_n) begin
             for (int j = 0; j < N; j++) begin
+                if (sum_valid[j] === 1'b1) begin
+                    got_raw[j][raw_cnt[j]] = sum_out[j];
+                    raw_cnt[j] = raw_cnt[j] + 1;
+                end
                 if (q8_valid[j] === 1'b1) begin
-                    got8[j][got_cnt[j]]    = q8_out[j];
-                    got_raw[j][got_cnt[j]] = sum_out[j];
+                    got8[j][got_cnt[j]] = q8_out[j];
                     got_cnt[j] = got_cnt[j] + 1;
                 end
             end
@@ -306,7 +318,7 @@ module tb_ws_tpu_n16;
         logic [31:0] st;
         logic [31:0] cfgword;
 
-        for (int j = 0; j < N; j++) got_cnt[j] = 0;
+        for (int j = 0; j < N; j++) begin got_cnt[j] = 0; raw_cnt[j] = 0; end
 
         cfgword = '0;
         cfgword[0] = 1'b1;                 // scale_mult = 1, shift = 0
@@ -343,10 +355,10 @@ module tb_ws_tpu_n16;
         end
 
         for (int j = 0; j < N; j++) begin
-            if (got_cnt[j] !== nv) begin
+            if (got_cnt[j] !== nv || raw_cnt[j] !== nv) begin
                 errors++;
-                $error("[%s] column %0d: %0d results, expected %0d",
-                       name, j, got_cnt[j], nv);
+                $error("[%s] column %0d: %0d q8 / %0d raw results, expected %0d each",
+                       name, j, got_cnt[j], raw_cnt[j], nv);
             end else begin
                 for (int v = 0; v < nv; v++) begin
                     y_exp = matvec(v, j);
