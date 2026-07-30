@@ -179,13 +179,42 @@ so the per-module split below is inferred where noted.
 | Quantity | Predicted N=16 | Basis | Measured |
 |---|---|---|---|
 | Array DSP | 256 (N²) | 1 fused DSP/PE (iteration 3) | **256** (288 total − 32 requant; see below) |
-| Requant DSP | 32 (2 × 16 lanes) | confirmed 2/lane at N=4 | **32** (32 distinct `gen_lane[*].u_rq` DSP instances named in DRC) |
-| Total DSP | 288 | | **288** (23.08% of 1248) — exact |
+| Requant DSP | 32 (2 × 16 lanes) | confirmed 2/lane at N=4 | **32** (32 distinct `gen_lane[*].u_rq` DSP instances named in DRC) — *standalone only, now 0 in-system; see below* |
+| Total DSP | 288 | | **288** (23.08% of 1248) — exact *for the standalone build; 256 in-system, see below* |
 | u_array LUT | ~2,600 | ~10 LUT/PE × 256, scales N² | *(not separable — no hierarchical report)* |
 | ws_quant_unit LUT | ~4,000 | array 2.6k + 4× requant + glue | **≤ 3,804** whole-top CLB LUTs (3,708 logic + 96 SRL), 3.25% — conservative by ≥5% |
 | ws_quant_unit FF | ~2,000 | skew Σ(i+1)·9b ≈ 1.2k + array ~640 | **≤ 2,639** whole-top CLB registers, 1.13% |
 | BRAM | 1 RAMB36-equiv (2×64×128 as RAMB18) | same packing as N=4 | **4 RAMB36E2** — *prediction missed* (see width note) |
 | WNS | within ~1 ns of N=4 | per-PE paths N-independent; RISK: load_mode/w_capture/valid broadcast fanout to 256 PEs | **+0.559 ns MET** at 4.700 ns; WHS **+0.055 ns**; TNS/THS 0.000, 0 failing endpoints |
+
+**DSP count changed on 2026-07-29 — 256 is now correct, not 288.** The
+table above is the 2026-07-16 measurement and remains accurate *for
+that build*, where `ws_tpu_top` was synthesized standalone and
+`q8_out`/`q8_valid` were top-level ports. OOC synthesis must preserve
+boundary ports because it cannot see what is outside them, so requant
+had an apparent consumer and its 32 DSPs survived.
+
+In the full Block Design those ports are genuinely unconnected, and
+nothing else reads them: `ws_result_capture` takes only `sum_in` /
+`val_in` (the pre-requant INT32 stream). With no consumer, Vivado
+correctly eliminates the whole requant subsystem — `get_cells -hier
+-filter {NAME =~ *requant*}` returns no matches, and DSP drops to
+**256 = N²**, the array alone.
+
+**This is expected, not a bug.** It is the direct consequence of the
+timing fix in a44910d, which removed the INT8 capture because
+`array sum_reg → requant → flop` measured 8.355 ns with 4.798-5.037 ns
+of *logic alone* against a 4.700 ns period. Re-wiring requant into the
+capture buffer is exactly what caused that violation, so it cannot be
+restored without pipelining requant first (shared by three call sites,
+hence the default-off-parameter approach if it is ever wanted).
+
+So for a full-system build: **expect 256 DSP and zero requant cells.**
+Expect 288 only in standalone/OOC runs of `ws_tpu_top`, where the
+boundary ports keep requant artificially alive. A future consumer —
+the DMA path, or `ws_tpu_tiled_top`, which already registers
+`rq_final` into `res_q8` and has never been synthesized — brings the
+32 DSPs back *and* brings the 5 ns timing wall back with them.
 
 **BRAM — why the 4× miss.** The prediction counted bits (2 × 64 × 128 b
 = 16 Kb, under one RAMB36's 36 Kb) but ignored port width. A RAMB36E2

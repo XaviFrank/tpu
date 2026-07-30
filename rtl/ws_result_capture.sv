@@ -40,6 +40,18 @@
 //   tiled top carries the same latent violation - it has simply never
 //   been synthesized.
 //
+//   KNOCK-ON, so it is not later reported as a synthesis bug: because
+//   this module taps only sum_in, and ws_tpu_top's q8_out/q8_valid
+//   ports go nowhere in a real system, NOTHING observes requant
+//   in-system and Vivado eliminates all 16 lanes. Confirmed on the
+//   routed design: get_cells -hier -filter {NAME =~ *requant*} returns
+//   no matches, and DSP total is 256 (= N², array only) rather than
+//   288. That is CORRECT for the current system. Standalone/OOC runs
+//   still report 288 because boundary ports must be preserved there.
+//   Restoring the 32 DSPs means giving requant a real consumer, which
+//   re-creates the 4.7 ns violation above unless requant is pipelined
+//   first - the two cannot be had together as the RTL stands.
+//
 //   Input pipeline stage: the streams are registered at this module's
 //   boundary before the bank write, so the long haul from the array's
 //   output registers to this block gets a full cycle of its own and

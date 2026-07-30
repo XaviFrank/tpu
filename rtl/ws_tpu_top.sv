@@ -18,9 +18,20 @@
 //   - Raw buffer write ports and bottom-edge results are top-level
 //     ports: the future DMA/AXI-HP attach points (TBs drive them
 //     directly today; data movement is NOT AXI-Lite's job).
-//   - Pure wiring + guards: zero registers, zero DSPs expected. A
-//     DSP appearing here in synth means something got miswired into
-//     logic rather than a straight port connection.
+//   - Pure wiring + guards: zero registers, zero DSPs expected from
+//     THIS file. A DSP appearing here in synth means something got
+//     miswired into logic rather than a straight port connection.
+//   - EXPECTED DSP TOTAL for this top: 256 (= N², the array) in a
+//     full-system build, and 288 standalone/OOC. The difference is
+//     real and expected, not a synthesis bug: q8_out/q8_valid are
+//     top-level ports with no consumer, and ws_result_capture taps
+//     only the pre-requant INT32 stream, so in-system Vivado
+//     correctly eliminates all 16 requant lanes (32 DSPs) as dead
+//     logic. OOC synthesis has to preserve boundary ports, so the
+//     same RTL reports 288 there. See docs/ws_design_notes.md and
+//     ws_result_capture's header for why the INT8 capture was
+//     removed (it could not close 4.7 ns) and what restoring it
+//     would cost.
 //====================================================================
 module ws_tpu_top #(
     parameter int N           = 4,
