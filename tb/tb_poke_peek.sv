@@ -308,6 +308,7 @@ module tb_poke_peek;
     // result streams against the untiled golden.
     task automatic run_and_check(input string name);
         logic [31:0] v;
+        logic [31:0] v2;
         logic [31:0] cfgword;
         int bad_sum, bad_q8, got, exp;
 
@@ -339,37 +340,55 @@ module tb_poke_peek;
             $display("PASS [%s] %0d INT32 sums peeked back exact vs the untiled golden",
                      name, NVECS*16);
 
-        // buf_sel 2 is reserved and must read 0. The INT8 stream is
-        // not captured - the array->requant->flop chain cannot close
-        // at 4.7ns (see the capture module header) - so this pins the
-        // documented behaviour rather than leaving it to drift.
-        peek_elem(2, 0, 0, v);
-        if (v !== 32'd0) begin
-            errors++;
-            $error("[%s] PEEK buf_sel 2 (reserved) = %h, expected 0", name, v);
-        end else
-            $display("PASS [%s] PEEK buf_sel 2 reads 0 (INT8 not captured, host requantizes)",
-                     name);
-
-        // Host-side requant, which is exactly what a PYNQ driver does
-        // with the INT32 readback. This is a HOST computation, not a
-        // hardware check - the hardware evidence is the INT32 compare
-        // above; requant itself is covered by tb_requant's vectors.
+        // REAL post-requant INT8 from silicon (buf_sel 2), four packed
+        // columns per element. This is hardware evidence now, not a
+        // host computation: the requant lanes are pipelined
+        // (RQ_PIPE=2) and ws_result_capture consumes q8_out/q8_valid,
+        // so these bytes came through the actual DSP multiply, the
+        // round/shift and the saturate.
         bad_q8 = 0;
         for (int vec = 0; vec < NVECS; vec++)
-            for (int j = 0; j < 16; j++) begin
-                peek_elem(3, j, vec, v);
-                got = clamp8($signed(v));
-                exp = clamp8(golden_sum(vec, j));
-                if (got !== exp) begin
-                    bad_q8 = bad_q8 + 1;
-                    errors++;
-                    $error("[%s host-int8] vec %0d col %0d = %0d, expected %0d",
-                           name, vec, j, got, exp);
+            for (int lane = 0; lane < LANES; lane++) begin
+                peek_elem(2, lane, vec, v);
+                for (int k = 0; k < 4; k++) begin
+                    got = $signed(v[k*8 +: 8]);
+                    exp = clamp8(golden_sum(vec, lane*4 + k));
+                    if (got !== exp) begin
+                        bad_q8 = bad_q8 + 1;
+                        errors++;
+                        $error("[%s hw-int8] vec %0d col %0d = %0d, expected %0d",
+                               name, vec, lane*4 + k, got, exp);
+                    end
                 end
             end
         if (bad_q8 == 0)
-            $display("PASS [%s] %0d host-requantized INT8 values match the golden",
+            $display("PASS [%s] %0d HW-requantized INT8 values exact vs golden (real requant path)",
+                     name, NVECS*16);
+
+        // Cross-check the two captured streams against each other.
+        // This is the capability the dual capture exists for: if the
+        // INT32 bank is right and the INT8 bank disagrees with a
+        // host-side requant of it, the bug is in the requant lanes,
+        // not the array. Checking each against golden separately would
+        // not localise it.
+        bad_q8 = 0;
+        for (int vec = 0; vec < NVECS; vec++)
+            for (int lane = 0; lane < LANES; lane++) begin
+                peek_elem(2, lane, vec, v);
+                for (int k = 0; k < 4; k++) begin
+                    got = $signed(v[k*8 +: 8]);
+                    peek_elem(3, lane*4 + k, vec, v2);
+                    exp = clamp8($signed(v2));      // host requant of the HW INT32
+                    if (got !== exp) begin
+                        bad_q8 = bad_q8 + 1;
+                        errors++;
+                        $error("[%s int8-vs-int32] vec %0d col %0d: HW int8 %0d != requant(HW int32) %0d",
+                               name, vec, lane*4 + k, got, exp);
+                    end
+                end
+            end
+        if (bad_q8 == 0)
+            $display("PASS [%s] HW INT8 == host requant of HW INT32 on all %0d (array/requant localisable)",
                      name, NVECS*16);
 
         // The host-side clamp only means anything if the sums actually

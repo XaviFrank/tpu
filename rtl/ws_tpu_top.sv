@@ -21,17 +21,16 @@
 //   - Pure wiring + guards: zero registers, zero DSPs expected from
 //     THIS file. A DSP appearing here in synth means something got
 //     miswired into logic rather than a straight port connection.
-//   - EXPECTED DSP TOTAL for this top: 256 (= N², the array) in a
-//     full-system build, and 288 standalone/OOC. The difference is
-//     real and expected, not a synthesis bug: q8_out/q8_valid are
-//     top-level ports with no consumer, and ws_result_capture taps
-//     only the pre-requant INT32 stream, so in-system Vivado
-//     correctly eliminates all 16 requant lanes (32 DSPs) as dead
-//     logic. OOC synthesis has to preserve boundary ports, so the
-//     same RTL reports 288 there. See docs/ws_design_notes.md and
-//     ws_result_capture's header for why the INT8 capture was
-//     removed (it could not close 4.7 ns) and what restoring it
-//     would cost.
+//   - EXPECTED DSP TOTAL for this top: 288 = 256 array (N^2) + 32
+//     requant (2 per lane x 16 lanes), in-system AND standalone.
+//     Requant is alive again because ws_result_capture consumes
+//     q8_out/q8_valid, so it is no longer dead code for Vivado to
+//     eliminate. It reports 256 with no consumer - if a build shows
+//     256, check that the capture is wired and DEBUG_CAPTURE is on
+//     before suspecting synthesis.
+//   - RQ_PIPE (default 2) sets the requant lanes' pipeline depth.
+//     Nonzero is REQUIRED here: q8 has a synchronous consumer and the
+//     unpipelined chain cannot close 4.7ns. See requant.sv.
 //====================================================================
 module ws_tpu_top #(
     parameter int N           = 4,
@@ -262,22 +261,21 @@ module ws_tpu_top #(
     // buf_sel 2 (INT8) reads 0 - see the capture module header: that
     // stream cannot be captured synchronously at this clock, so the
     // host requantizes the INT32 values itself.
-    logic        cap_rd_en;
+    logic        cap_rd_en, cap_rd_is_q8;
     logic [31:0] cap_rd_data;
 
     logic [VEC_W-1:0] peek_vec_sel;
     logic [3:0]       peek_idx_sel;
 
-    assign cap_rd_en     = core_peek_valid && core_peek_addr[11]
-                                           && core_peek_addr[10];
+    assign cap_rd_en     = core_peek_valid && core_peek_addr[11];
+    assign cap_rd_is_q8  = !core_peek_addr[10];   // buf_sel 2 = INT8, 3 = INT32
     assign peek_vec_sel  = core_peek_addr[VEC_W-1:0];
     assign peek_idx_sel  = core_peek_addr[9:6];
 
     always_ff @(posedge core_clk) begin
         if (peek_v_q) begin
-            if (peek_sel_q == 2'd2)      peek_data_r <= 32'd0;
-            else if (peek_sel_q == 2'd3) peek_data_r <= cap_rd_data;
-            else                         peek_data_r <= peek_lane_val;
+            if (peek_sel_q[1]) peek_data_r <= cap_rd_data;
+            else               peek_data_r <= peek_lane_val;
         end
     end
 
@@ -291,7 +289,7 @@ module ws_tpu_top #(
     //----------------------------------------------------------------
     if (DEBUG_CAPTURE != 0) begin : gen_capture
         ws_result_capture #(
-            .N(N), .ACC_WIDTH(ACC_WIDTH),
+            .N(N), .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
             .VEC_W(VEC_W), .MAX_N_VECS(MAX_N_VECS)
         ) u_cap (
             .clk       (core_clk),
@@ -299,7 +297,10 @@ module ws_tpu_top #(
             .arm       (core_go),
             .sum_in    (sum_out),
             .val_in    (sum_valid),
+            .q8_in     (q8_out),
+            .q8_val_in (q8_valid),
             .rd_en     (cap_rd_en),
+            .rd_is_q8  (cap_rd_is_q8),
             .rd_vec    (peek_vec_sel),
             .rd_idx    (peek_idx_sel),
             .rd_data   (cap_rd_data)

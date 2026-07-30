@@ -22,35 +22,26 @@
 //   a run's n_vecs deliberately retain the previous run's data -
 //   hosts read 0..n_vecs-1.
 //
-//   INT32 ONLY - the INT8 stream is deliberately NOT captured.
-//   Measured on the routed build: the combinational chain
-//   array sum_reg -> requant (32x16 multiply + round/shift + int8
-//   saturate) -> a capturing flop is 8.355ns, of which 4.798-5.037ns
-//   is LOGIC alone, against a 4.700ns period. That block cannot close
-//   at this clock no matter where registers are placed AROUND it, and
-//   it cannot be multicycled because q8_valid is asserted on
-//   back-to-back cycles while vectors stream. Capturing q8 would
-//   require pipelining inside requant, which is shared by three other
-//   call sites. Hosts apply the requant math to the INT32 values
-//   instead - which is what a PYNQ driver does anyway, and requant
-//   itself is covered exhaustively by tb_requant.
-//   NOTE for the future DMA path and for ws_tpu_tiled_top: any
-//   SYNCHRONOUS consumer of a requant output hits this same wall.
-//   ws_tiling_engine already registers rq_final into res_q8, so the
-//   tiled top carries the same latent violation - it has simply never
-//   been synthesized.
+//   BOTH streams are captured: the raw INT32 accumulator sums AND the
+//   requantized INT8 values, so a hardware mismatch localises to the
+//   array (sums wrong) or the requant lanes (sums right, INT8 wrong)
+//   without another build. They arrive at DIFFERENT times - the
+//   requant lanes run at ws_quant_unit's RQ_PIPE depth - so each bank
+//   has its own valid and its own write index. Nothing here assumes a
+//   fixed offset between the two streams, which is what lets RQ_PIPE
+//   change without touching this module.
 //
-//   KNOCK-ON, so it is not later reported as a synthesis bug: because
-//   this module taps only sum_in, and ws_tpu_top's q8_out/q8_valid
-//   ports go nowhere in a real system, NOTHING observes requant
-//   in-system and Vivado eliminates all 16 lanes. Confirmed on the
-//   routed design: get_cells -hier -filter {NAME =~ *requant*} returns
-//   no matches, and DSP total is 256 (= N², array only) rather than
-//   288. That is CORRECT for the current system. Standalone/OOC runs
-//   still report 288 because boundary ports must be preserved there.
-//   Restoring the 32 DSPs means giving requant a real consumer, which
-//   re-creates the 4.7 ns violation above unless requant is pipelined
-//   first - the two cannot be had together as the RTL stands.
+//   HISTORY, because it is easy to re-break: capturing INT8 from
+//   COMBINATIONAL requant lanes is what caused a -3.857ns setup
+//   violation (array sum_reg -> requant -> flop measured 8.355ns with
+//   4.8-5.0ns of that LOGIC alone, against a 4.700ns period). It was
+//   removed in a44910d and restored only once requant itself was
+//   pipelined. Do not wire an UNPIPELINED requant output into a
+//   synchronous consumer at this clock - see requant.sv's header for
+//   the cut points and why registering its output is not enough.
+//   ws_tpu_tiled_top still registers rq_final into res_q8 from a
+//   PIPE_STAGES=0 instance and has never been synthesized, so it
+//   carries that same latent violation.
 //
 //   Input pipeline stage: the streams are registered at this module's
 //   boundary before the bank write, so the long haul from the array's
@@ -66,6 +57,7 @@
 module ws_result_capture #(
     parameter int N          = 4,
     parameter int ACC_WIDTH  = 32,
+    parameter int OUT_WIDTH  = 8,
     parameter int VEC_W      = 4,
     parameter int MAX_N_VECS = 16
 )(
@@ -79,10 +71,19 @@ module ws_result_capture #(
     input  logic signed [ACC_WIDTH-1:0] sum_in    [N],
     input  logic                        val_in    [N],
 
+    // requantized INT8 stream. SEPARATE valid on purpose: with the
+    // requant lanes pipelined (ws_quant_unit RQ_PIPE), q8 trails its
+    // INT32 source, so it gets its own write index rather than
+    // borrowing the sum's. Nothing here assumes a fixed offset
+    // between the two streams.
+    input  logic signed [OUT_WIDTH-1:0] q8_in     [N],
+    input  logic                        q8_val_in [N],
+
     // registered debug read: rd_data valid one cycle after rd_en
     input  logic                        rd_en,
+    input  logic                        rd_is_q8,   // 0 = INT32, 1 = INT8 lane
     input  logic [VEC_W-1:0]            rd_vec,
-    input  logic [3:0]                  rd_idx,     // column
+    input  logic [3:0]                  rd_idx,     // column, or q8 lane
     output logic [31:0]                 rd_data
 );
 
@@ -118,6 +119,13 @@ module ws_result_capture #(
     logic [ACC_WIDTH-1:0] p1_sum [N];
     logic [VEC_W-1:0]     p1_idx [N];
 
+    // INT8 banks, with their own write index and their own input pipe
+    logic [OUT_WIDTH-1:0] q8_bank [N][MAX_N_VECS];
+    logic [VEC_W-1:0]     q_cnt   [N];
+    logic                 q1_val  [N];
+    logic [OUT_WIDTH-1:0] q1_q8   [N];
+    logic [VEC_W-1:0]     q1_idx  [N];
+
     for (genvar j = 0; j < N; j++) begin : gen_cap
         // write index advances on the INCOMING valid; the index that
         // each value belongs to travels with it through the pipe, so
@@ -146,6 +154,31 @@ module ws_result_capture #(
             if (p1_val[j])
                 sum_bank[j][p1_idx[j]] <= p1_sum[j];
         end
+
+        // ---- INT8, same shape, independent index ----
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n)
+                q_cnt[j] <= '0;
+            else if (arm)
+                q_cnt[j] <= '0;
+            else if (q8_val_in[j])
+                q_cnt[j] <= q_cnt[j] + 1'b1;
+        end
+
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) q1_val[j] <= 1'b0;
+            else        q1_val[j] <= q8_val_in[j];
+        end
+
+        always_ff @(posedge clk) begin
+            q1_q8[j]  <= q8_in[j];
+            q1_idx[j] <= q_cnt[j];
+        end
+
+        always_ff @(posedge clk) begin
+            if (q1_val[j])
+                q8_bank[j][q1_idx[j]] <= q1_q8[j];
+        end
     end
 
     //----------------------------------------------------------------
@@ -154,6 +187,8 @@ module ws_result_capture #(
     // N=4), where columns 4..15 do not exist.
     //----------------------------------------------------------------
     logic [31:0] sum_word;
+    logic [31:0] q8_word;
+    int          q8_idx;
 
     always_comb begin
         sum_word = 32'd0;
@@ -161,9 +196,23 @@ module ws_result_capture #(
             sum_word = sum_bank[rd_idx][rd_vec];
     end
 
+    // q8 lane: four packed INT8s, columns lane*4 .. lane*4+3, element
+    // 0 in bits [7:0] to match the buffer-word convention. Bounds
+    // checked because this module is built at N=4 as well as N=16.
+    always_comb begin
+        q8_word = 32'd0;
+        for (int k = 0; k < 4; k++) begin
+            q8_idx = rd_idx[1:0] * 4 + k;
+            if (q8_idx < N)
+                q8_word[k*8 +: 8] = q8_bank[q8_idx][rd_vec];
+        end
+    end
+
     always_ff @(posedge clk) begin
-        if (rd_en)
-            rd_data <= sum_word;
+        if (rd_en) begin
+            if (rd_is_q8) rd_data <= q8_word;
+            else          rd_data <= sum_word;
+        end
     end
 
 endmodule
