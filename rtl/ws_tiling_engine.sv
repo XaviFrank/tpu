@@ -298,6 +298,7 @@ module ws_tiling_engine #(
         .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
         .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
     ) u_rq_final (
+        .clk        (clk),
         .acc_in     (p1_acc),
         .relu_en    (relu_en),
         .scale_mult (scale_mult),

@@ -102,6 +102,7 @@ module quant_engine #(
             .ACC_WIDTH(ACC_WIDTH), .OUT_WIDTH(OUT_WIDTH),
             .SCALE_WIDTH(SCALE_WIDTH), .SHIFT_WIDTH(SHIFT_WIDTH)
         ) u_rq (
+            .clk        (clk),
             .acc_in     (lane_acc[j]),
             .relu_en    (relu_en),
             .scale_mult (scale_mult),
