@@ -544,6 +544,56 @@ module tb_poke_peek;
         end else
             $display("PASS [S4] poke_err clear: every commit was delivered");
 
+        //--- S9: overwrite-in-place, peeked back, BOTH buffers --------
+        // Reproduces a reported hardware symptom: activation word 0
+        // reading back [1,0,0,...] with element 0 stuck at the first
+        // value ever poked and elements 1-15 always 0, while the
+        // weight buffer behaved correctly. S8 re-pokes both buffers
+        // but only verifies through results, so overwrite-in-place was
+        // never directly peeked back - this closes that gap.
+        begin
+            int bad;
+            bad = 0;
+
+            for (int pass = 0; pass < 2; pass++) begin
+                // pass 0: 1..16   pass 1: 100..115 - the second
+                // differs from the first in EVERY byte
+                for (int e = 0; e < 16; e++) begin
+                    av[0][e] = (pass == 0) ? (e + 1) : (100 + e);
+                    W[0][e]  = (pass == 0) ? (e + 1) : (100 + e);
+                end
+
+                word = pack_avec(0);
+                poke_word(1, 0, word);
+                for (int lane = 0; lane < LANES; lane++) begin
+                    peek_elem(1, lane, 0, rd);
+                    expect_lane = word[lane*32 +: 32];
+                    if (rd !== expect_lane) begin
+                        bad = bad + 1;
+                        errors++;
+                        $error("[S9 pass%0d act] word 0 lane %0d = %h, expected %h",
+                               pass, lane, rd, expect_lane);
+                    end
+                end
+
+                word = pack_row(0);
+                poke_word(0, 0, word);
+                for (int lane = 0; lane < LANES; lane++) begin
+                    peek_elem(0, lane, 0, rd);
+                    expect_lane = word[lane*32 +: 32];
+                    if (rd !== expect_lane) begin
+                        bad = bad + 1;
+                        errors++;
+                        $error("[S9 pass%0d wgt] word 0 lane %0d = %h, expected %h",
+                               pass, lane, rd, expect_lane);
+                    end
+                end
+            end
+
+            if (bad == 0)
+                $display("PASS [S9] overwrite-in-place peeks back exact on BOTH buffers (2 passes, every byte changed)");
+        end
+
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge aclk);
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
