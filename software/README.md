@@ -4,10 +4,12 @@ Python tooling, deliberately kept out of the hardware source tree.
 Nothing here touches `rtl/`, `tb/`, `constraints/`, `regress.sh` or the
 Vivado project. `regress.sh` is unchanged and still covers hardware only.
 
-**v1 scope: a single-tensor proof.** Layer 0's `self_attn.q_proj`, one
-16×16 tile of it, end to end — download → quantize → pack → golden.
-Everything else (all 196 matmul tensors, RMSNorm gamma, embeddings /
-LM head) is explicitly deferred.
+**Scope: single-tile proofs.** Layer 0's `self_attn.q_proj` and
+`self_attn.k_proj`, one 16×16 tile of each, end to end — download →
+quantize → pack → golden. Everything else (the other 194 matmul
+tensors, RMSNorm gamma, embeddings / LM head) is explicitly deferred.
+
+`q_proj` tile 0 has been **verified bit-exact on real hardware**.
 
 **This pipeline runs entirely offline.** It has no board access and
 does not talk to hardware. Its job ends at the artifact; running that
@@ -26,20 +28,33 @@ Run in order:
 
 ```
 python fetch_qwen.py
-python quantize_pack.py
+python quantize_pack.py q_proj      # default
+python quantize_pack.py k_proj
 ```
+
+One parameterized script handles both, rather than a copy per tensor —
+running *identical code* over two different shapes is what shows the
+packer isn't shape-specific.
 
 Dependencies: `numpy` and `tokenizers`. **No torch, no transformers** —
 see "Why no torch" below.
 
 ## The deliverable
 
-`out/qproj_l0_tile0.json` — self-describing, with `weight_words` (16 ×
-128-bit, each with its four 32-bit `poke_lanes` ready to write),
-`activation_words`, the scales, and `expected.golden_int32`.
+`out/qproj_l0_tile0.json` and `out/kproj_l0_tile0.json` —
+self-describing, with `weight_words` (16 × 128-bit, each with its four
+32-bit `poke_lanes` ready to write), `activation_words`, the scales,
+and `expected.golden_int32`.
 
-Also `out/{weights_int8_loaded,activation_int8,golden_int32}.npy` for
-anything that would rather have arrays than JSON.
+Also `out/<stem>_{weights_int8_loaded,activation_int8,golden_int32}.npy`
+for anything that would rather have arrays than JSON.
+
+**The activation is identical across the two.** Q/K/V at layer 0 all
+read the same `input_layernorm` output — Qwen3's `q_norm`/`k_norm` are
+`[head_dim]` and apply *after* the projection. Verified, not assumed:
+the activation word, `a_scale` and the int8 activation array are
+bit-identical between the two artifacts. A board already holding the
+Q-proj activation only needs the 16 weight words re-poked.
 
 ### Two different checks, do not conflate them
 
@@ -98,12 +113,37 @@ error reads 70% max — but only on columns where the result is near zero
 explodes there while absolute error stays flat. Use the span-normalised
 figures; the artifact carries both plus a note.
 
-**Per-tensor scaling costs ~6.5×, and that is the right next step.**
-The weight scale comes from the full tensor (|max| 0.645) while this
-tile only reaches 0.289, so the slice uses **57 of 127** int8 levels.
-Per-output-channel scaling would cut error from 2.99% to 0.46% of span.
-Not applied here on purpose: per-tensor is what a real deployment of
-the whole tensor uses, and a slice-local scale would flatter the proof.
+### Second data point: k_proj (GQA-asymmetric, 1024→1024)
+
+Same code, different shape — `k_proj` is `[1024, 1024]` against
+`q_proj`'s `[2048, 1024]`, because Qwen3 has 8 KV heads to 16 Q heads.
+Nothing in the packer is shape-aware; only "input dim == hidden" and
+"both dims tile at 16" are asserted.
+
+|                        | q_proj        | k_proj        |
+|------------------------|---------------|---------------|
+| tensor shape           | [2048, 1024]  | [1024, 1024]  |
+| `w_absmax` (tensor)    | 0.6445        | 0.4336        |
+| int8 levels used /127  | 57            | 51            |
+| err vs span, max       | 2.99%         | 1.25%         |
+| err vs span, mean      | 1.17%         | 0.35%         |
+| per-channel err, max   | 0.46%         | 0.74%         |
+
+Two things worth noting. The **under-use of int8 range reproduces**
+(57 and 51 of 127), so it is a property of per-tensor scaling at tile
+0, not a quirk of one tensor. But the **per-channel win does not
+generalise**: 6.5× on q_proj, only 1.7× on k_proj, and k_proj's
+per-channel result is actually *worse* in absolute terms than
+q_proj's. Per-channel helps most where row magnitudes are widely
+spread; it is still the right direction, but "6.5× better" was a
+one-tensor number and should not be extrapolated.
+
+**Why per-tensor anyway.** On q_proj the weight scale comes from the
+full tensor (|max| 0.645) while tile 0 only reaches 0.289, so the slice
+gets 57 of 127 levels. Per-channel is not applied here on purpose:
+per-tensor is what a real deployment of the whole tensor uses, and a
+slice-local scale would flatter the proof. The numbers above are
+reported so the trade is visible, not hidden.
 
 ## Why no torch
 
@@ -124,7 +164,8 @@ precedes it.
   [2048, 1024] = 64 K-tiles × 128 N-tiles, which needs
   `ws_tpu_tiled_top`; the current bitstream is single-tile
   `ws_tpu_top`, hence one 16×16 tile here.
-- **Per-channel weight scales** — quantified above, ~6.5× better.
+- **Per-channel weight scales** — quantified above; 6.5× on q_proj but
+  only 1.7× on k_proj, so measure per tensor rather than assuming.
 - **Calibration beyond layer 0** — needs a forward pass.
 - **RMSNorm gamma** — elementwise, never touches the array; own spec.
 - **Embeddings / LM head** — a gather, not a matmul. Note

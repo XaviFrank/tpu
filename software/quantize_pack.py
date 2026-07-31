@@ -50,6 +50,7 @@ PACKING - see spec section 4, answered from the RTL
 
 import json
 import os
+import sys
 
 import numpy as np
 
@@ -74,6 +75,15 @@ CALIB_TEXTS = [
 ]
 
 
+# Which tensor to pack. Q/K/V at layer 0 all read the SAME activation -
+# there is one input_layernorm, and Qwen3's q_norm/k_norm are [head_dim]
+# applied AFTER the projection - so calibration carries over unchanged.
+TENSORS = {
+    "q_proj": "model.layers.0.self_attn.q_proj.weight",
+    "k_proj": "model.layers.0.self_attn.k_proj.weight",
+}
+
+
 def rmsnorm(x, gamma, eps):
     """Qwen3 RMSNorm, computed in float32 exactly as the reference does."""
     var = np.mean(x.astype(np.float32) ** 2, axis=-1, keepdims=True)
@@ -82,14 +92,21 @@ def rmsnorm(x, gamma, eps):
 
 def main():
     os.makedirs(OUT, exist_ok=True)
+    which = sys.argv[1] if len(sys.argv) > 1 else "q_proj"
+    assert which in TENSORS, f"unknown tensor {which}; pick from {list(TENSORS)}"
+    tensor_name = TENSORS[which]
+    print(f"tensor: {tensor_name}")
 
     cfg = json.load(open(os.path.join(CACHE, "config.json")))
     eps = cfg["rms_norm_eps"]
     hidden = cfg["hidden_size"]
 
-    W_pt = np.load(os.path.join(CACHE, "model.layers.0.self_attn.q_proj.weight.npy"))
+    W_pt = np.load(os.path.join(CACHE, tensor_name + ".npy"))
     gamma = np.load(os.path.join(CACHE, "model.layers.0.input_layernorm.weight.npy"))
-    assert W_pt.shape == (2048, hidden), W_pt.shape
+    # Shape is NOT hard-coded: k_proj is [1024,1024] where q_proj is
+    # [2048,1024] (GQA has fewer KV heads). Only the input dim must match.
+    assert W_pt.ndim == 2 and W_pt.shape[1] == hidden, W_pt.shape
+    assert W_pt.shape[0] % N == 0 and W_pt.shape[1] % K == 0,         f"{W_pt.shape} does not tile cleanly at N={N}, K={K}"
 
     # ---- calibration: real tokens -> real layer-0 activations --------
     from tokenizers import Tokenizer
@@ -212,7 +229,7 @@ def main():
     artifact = {
         "source": {
             "repo": "Qwen/Qwen3-0.6B",
-            "tensor": "model.layers.0.self_attn.q_proj.weight",
+            "tensor": tensor_name,
             "tensor_shape": list(W_pt.shape),
             "slice": {"out_dims": [0, N], "in_dims": [0, K],
                       "note": "one 16x16 tile of the real tensor; the "
@@ -275,13 +292,15 @@ def main():
         "n_vecs": 1,
     }
 
-    with open(os.path.join(OUT, "qproj_l0_tile0.json"), "w") as f:
+    stem = which.replace("_proj", "proj") + "_l0_tile0"
+    with open(os.path.join(OUT, stem + ".json"), "w") as f:
         json.dump(artifact, f, indent=2)
-    np.save(os.path.join(OUT, "weights_int8_loaded.npy"), W_loaded.astype(np.int8))
-    np.save(os.path.join(OUT, "activation_int8.npy"), Aq.astype(np.int8))
-    np.save(os.path.join(OUT, "golden_int32.npy"), golden.astype(np.int32))
+    np.save(os.path.join(OUT, stem + "_weights_int8_loaded.npy"), W_loaded.astype(np.int8))
+    np.save(os.path.join(OUT, stem + "_activation_int8.npy"), Aq.astype(np.int8))
+    np.save(os.path.join(OUT, stem + "_golden_int32.npy"), golden.astype(np.int32))
 
-    print(f"\nartifact -> {os.path.join(OUT, 'qproj_l0_tile0.json')}")
+    print("")
+    print("artifact -> " + os.path.join(OUT, stem + '.json'))
     print(f"golden int32: {[int(v) for v in golden]}")
 
 
