@@ -82,6 +82,8 @@ TENSORS = {
     "q_proj": "model.layers.0.self_attn.q_proj.weight",
     "k_proj": "model.layers.0.self_attn.k_proj.weight",
     "gate_proj": "model.layers.0.mlp.gate_proj.weight",
+    "up_proj": "model.layers.0.mlp.up_proj.weight",
+    "down_proj": "model.layers.0.mlp.down_proj.weight",
 }
 
 # Where each tensor's input activation comes from. Q/K/V read
@@ -94,7 +96,14 @@ ACT_SOURCE = {
     "q_proj": "attn_in",
     "k_proj": "attn_in",
     "gate_proj": "mlp_in",
+    "up_proj": "mlp_in",
+    # down_proj is the different one: its input is the FULL 3072-wide
+    # silu(gate(x))*up(x), so a tile of it cannot be built from sliced
+    # matmuls - the whole gate and up projections must be computed.
+    "down_proj": "ffn_in",
 }
+
+ACT_WIDTH = {"attn_in": "hidden", "mlp_in": "hidden", "ffn_in": "intermediate"}
 
 
 def rmsnorm(x, gamma, eps):
@@ -116,9 +125,10 @@ def main():
 
     W_pt = np.load(os.path.join(CACHE, tensor_name + ".npy"))
     gamma = np.load(os.path.join(CACHE, "model.layers.0.input_layernorm.weight.npy"))
-    # Shape is NOT hard-coded: k_proj is [1024,1024] where q_proj is
-    # [2048,1024] (GQA has fewer KV heads). Only the input dim must match.
-    assert W_pt.ndim == 2 and W_pt.shape[1] == hidden, W_pt.shape
+    # Input dim must match whatever feeds this tensor: hidden (1024) for
+    # q/k/gate/up, intermediate (3072) for down_proj.
+    in_dim = hidden if ACT_WIDTH[ACT_SOURCE[which]] == "hidden" else cfg["intermediate_size"]
+    assert W_pt.ndim == 2 and W_pt.shape[1] == in_dim, (W_pt.shape, in_dim)
     assert W_pt.shape[0] % N == 0 and W_pt.shape[1] % K == 0,         f"{W_pt.shape} does not tile cleanly at N={N}, K={K}"
 
     # ---- calibration: real tokens -> real layer-0 activations --------
@@ -135,8 +145,9 @@ def main():
     else:
         # full attention per sequence - position matters here, so this
         # cannot be done per unique token the way attn_in can be
-        from attention_l0 import forward_layer0
-        per_seq = [forward_layer0(s)[0] for s in seqs]
+        from attention_l0 import forward_layer0, forward_layer0_ffn
+        fwd = forward_layer0 if ACT_SOURCE[which] == "mlp_in" else forward_layer0_ffn
+        per_seq = [fwd(s)[0] for s in seqs]
         acts = np.concatenate(per_seq, axis=0)
     a_absmax = float(np.abs(acts).max())
     a_p999 = float(np.percentile(np.abs(acts), 99.9))
@@ -229,6 +240,22 @@ def main():
     print(f"  per-element rel: max {rel.max():.1%}  mean {rel.mean():.1%}"
           f"   <- inflated by near-zero columns, see note")
 
+    # PARTIAL-SUM CONTEXT. This tile covers only K of the tensor's full
+    # input dimension, so the partial span is not the real output scale.
+    # down_proj is the extreme case - 16 of 3072 (1/192), and its partial
+    # is about 2.6% of the true output - which makes err/partial-span look
+    # alarming while the ABSOLUTE error is the smallest of any tensor here.
+    # Normalising against the full output is the honest comparison across
+    # tensors with different K.
+    y_full = W_pt[:N, :].astype(np.float64) @ a_full.astype(np.float64)
+    full_span = float(np.abs(y_full).max())
+    k_total = int(W_pt.shape[1])
+    print(f"  partial-sum context: tile covers {K}/{k_total} of K (1/{k_total//K}); "
+          f"partial span {span:.5f} vs full-output span {full_span:.5f} "
+          f"({span/full_span:.1%} of it)")
+    print(f"  err vs FULL output span: max {abs_err.max()/full_span:.3%}  "
+          f"mean {abs_err.mean()/full_span:.3%}   <- the cross-tensor comparison")
+
     # How much precision the deployment-realistic scale costs on this
     # tile, and what per-output-channel scaling would buy. Reported, not
     # applied: the artifact keeps the per-tensor scale because that is
@@ -319,6 +346,17 @@ def main():
             "per_element_rel_max": float(rel.max()),
             "int8_levels_used_by_slice": levels_used,
             "per_channel_err_vs_span_max": float(abs_err_pc.max() / span),
+            "k_covered_by_tile": K,
+            "k_total": k_total,
+            "k_tiles_for_full_output": k_total // K,
+            "full_output_span_absmax": full_span,
+            "partial_span_fraction_of_full": span / full_span,
+            "err_vs_full_output_span_max": float(abs_err.max() / full_span),
+            "err_vs_full_output_span_mean": float(abs_err.mean() / full_span),
+            "partial_sum_note": ("this tile is a partial sum over K; err_vs_span_* "
+                                 "normalises by the PARTIAL span and overstates error "
+                                 "when the tile covers a small fraction of K. Use "
+                                 "err_vs_full_output_span_* to compare across tensors."),
         },
         "n_vecs": 1,
     }

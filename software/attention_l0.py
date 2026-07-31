@@ -54,7 +54,7 @@ OUT = os.path.join(HERE, "out")
 # untested (spec section 1).
 TEST_TEXT = "Systolic arrays exploit data reuse by streaming operands through a mesh."
 
-L = "model.layers.0."
+L_ = "model.layers.0."
 
 
 def T(name):
@@ -102,20 +102,20 @@ def forward_layer0(ids):
     x = np.stack([rows[int(t)] for t in ids]).astype(np.float64)   # [T, H]
 
     # ---- 2. input_layernorm --------------------------------------
-    h = rmsnorm(x, T(L + "input_layernorm.weight"), eps)
+    h = rmsnorm(x, T(L_ + "input_layernorm.weight"), eps)
 
     # ---- 3. Q/K/V projections (full matrices, no slicing) --------
     # nn.Linear stores [out, in] and computes x @ W.T
-    q = h @ T(L + "self_attn.q_proj.weight").T          # [T, 2048]
-    k = h @ T(L + "self_attn.k_proj.weight").T          # [T, 1024]
-    v = h @ T(L + "self_attn.v_proj.weight").T          # [T, 1024]
+    q = h @ T(L_ + "self_attn.q_proj.weight").T          # [T, 2048]
+    k = h @ T(L_ + "self_attn.k_proj.weight").T          # [T, 1024]
+    v = h @ T(L_ + "self_attn.v_proj.weight").T          # [T, 1024]
     q = q.reshape(Tn, nq, hd)
     k = k.reshape(Tn, nkv, hd)
     v = v.reshape(Tn, nkv, hd)
 
     # ---- 4. QK-norm, over head_dim, BEFORE RoPE ------------------
-    q = rmsnorm(q, T(L + "self_attn.q_norm.weight"), eps)
-    k = rmsnorm(k, T(L + "self_attn.k_norm.weight"), eps)
+    q = rmsnorm(q, T(L_ + "self_attn.q_norm.weight"), eps)
+    k = rmsnorm(k, T(L_ + "self_attn.k_norm.weight"), eps)
 
     # ---- 5. RoPE -------------------------------------------------
     inv_freq = 1.0 / (theta ** (np.arange(0, hd, 2, dtype=np.float64) / hd))
@@ -206,13 +206,13 @@ def forward_layer0(ids):
     attn = attn.transpose(1, 0, 2).reshape(Tn, nq * hd)   # [T, 2048]
 
     # ---- 8. O-proj ------------------------------------------------
-    o = attn @ T(L + "self_attn.o_proj.weight").T         # [T, 1024]
+    o = attn @ T(L_ + "self_attn.o_proj.weight").T         # [T, 1024]
 
     # ---- 9. residual, against the PRE-norm input ------------------
     xr = x + o
 
     # ---- 10. post_attention_layernorm = gate_proj's input ---------
-    gate_in = rmsnorm(xr, T(L + "post_attention_layernorm.weight"), eps)
+    gate_in = rmsnorm(xr, T(L_ + "post_attention_layernorm.weight"), eps)
     assert gate_in.shape == (Tn, H)
 
     checks["seq_len"] = Tn
@@ -285,6 +285,73 @@ def main():
         json.dump(meta, f, indent=2)
     print(f"\nsaved out/gate_proj_input_l0.npy  [{Tn}, {H}] float32")
     print(f"      out/gate_proj_input_l0.json  (metadata + self-check results)")
+
+
+
+def _sigmoid(x):
+    """Overflow-safe sigmoid. Gate values reach large magnitudes, and the
+    naive 1/(1+exp(-x)) overflows for very negative x."""
+    out = np.empty_like(x)
+    pos = x >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    ex = np.exp(x[~pos])
+    out[~pos] = ex / (1.0 + ex)
+    return out
+
+
+def forward_layer0_ffn(ids):
+    """SwiGLU intermediate for one sequence: silu(gate(h)) * up(h).
+
+    This is the REAL input to mlp.down_proj - the full 3072-wide gated
+    vector, which is why a down_proj tile cannot be built from a sliced
+    computation. modeling_qwen3.py:81-83 with hidden_act "silu".
+
+    Returns (inter, checks) where inter is [T, intermediate_size].
+    Shares forward_layer0 rather than re-deriving the block.
+    """
+    h, checks = forward_layer0(ids)
+    g = h @ T(L_ + "mlp.gate_proj.weight").T          # [T, 3072] FULL, not sliced
+    u = h @ T(L_ + "mlp.up_proj.weight").T            # [T, 3072] FULL, not sliced
+    silu = g * _sigmoid(g)
+    inter = silu * u
+
+    # CHECK W1 - exact sign identity. sign(silu(x)) == sign(x) for all x,
+    # so sign(inter) must equal sign(g)*sign(u) everywhere. This is an
+    # algebraic identity, not a tolerance, and it catches a flipped sign,
+    # a swapped gate/up, or silu applied to the wrong operand.
+    # (Note: SiLU is NOT monotonic - it dips to about -0.278 near
+    # x = -1.278 - so monotonicity is the wrong property to lean on.
+    # The sign identity is what actually holds.)
+    nz = (g != 0) & (u != 0)
+    sign_ok = bool(np.array_equal(np.sign(inter[nz]),
+                                  np.sign(g[nz]) * np.sign(u[nz])))
+    checks["swiglu_sign_identity"] = sign_ok
+    assert sign_ok, "sign(silu(g)*u) != sign(g)*sign(u) - gate/up or silu is wrong"
+
+    # CHECK W2 - the gated product collapses where the gate is strongly
+    # negative, against a TIGHT ANALYTIC bound rather than a guessed
+    # constant. |silu(x)| = |x|*sigmoid(x) peaks at x ~ -1.278 and
+    # decreases monotonically as x -> -inf, so for every g <= t (with
+    # t < -1.278) the exact supremum is |silu(t)|. Threshold picked from
+    # the real distribution: gate min is about -5.1 here, so -4 leaves a
+    # populated tail. The count assert keeps it from passing vacuously.
+    THR = -4.0
+    strong_neg = g < THR
+    checks["swiglu_strong_neg_count"] = int(strong_neg.sum())
+    assert strong_neg.sum() > 0, (
+        f"no gate values below {THR} (gate min {g.min():.3f}) - check is vacuous")
+    bound = float(abs(THR) * _sigmoid(np.array([THR]))[0])   # |silu(THR)|
+    ratio = np.abs(inter[strong_neg]) / np.maximum(np.abs(u[strong_neg]), 1e-30)
+    worst = float(ratio.max())
+    checks["swiglu_collapse_ratio_max"] = worst
+    checks["swiglu_collapse_analytic_bound"] = bound
+    assert worst <= bound + 1e-12, (
+        f"gated product exceeded the |silu({THR})| bound: {worst} > {bound}")
+
+    checks["gate_absmax"] = float(np.abs(g).max())
+    checks["up_absmax"] = float(np.abs(u).max())
+    checks["ffn_intermediate_absmax"] = float(np.abs(inter).max())
+    return inter, checks
 
 
 if __name__ == "__main__":

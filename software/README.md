@@ -32,6 +32,8 @@ python fetch_qwen.py
 python quantize_pack.py q_proj      # default
 python quantize_pack.py k_proj
 python quantize_pack.py gate_proj  # needs attention_l0 for its activation
+python quantize_pack.py up_proj
+python quantize_pack.py down_proj  # needs the full SwiGLU intermediate
 ```
 
 One parameterized script handles both, rather than a copy per tensor —
@@ -115,23 +117,29 @@ error reads 70% max — but only on columns where the result is near zero
 explodes there while absolute error stays flat. Use the span-normalised
 figures; the artifact carries both plus a note.
 
-### Three tensors, same code
+### Five tensors, same code — layer 0's attention and FFN complete
 
-Same code, different shape — `k_proj` is `[1024, 1024]` against
-`q_proj`'s `[2048, 1024]`, because Qwen3 has 8 KV heads to 16 Q heads.
-Nothing in the packer is shape-aware; only "input dim == hidden" and
-"both dims tile at 16" are asserted.
+| | q_proj | k_proj | gate_proj | up_proj | down_proj |
+|---|---|---|---|---|---|
+| shape | [2048,1024] | [1024,1024] | [3072,1024] | [3072,1024] | [1024,3072] |
+| activation source | attn_in | attn_in | mlp_in | mlp_in | **ffn_in** |
+| K covered by tile | 1/64 | 1/64 | 1/64 | 1/64 | **1/192** |
+| int8 levels /127 | 57 | 51 | 96 | 35 | 42 |
+| abs err max | 0.0108 | 0.0057 | 0.0110 | 0.0101 | **0.0021** |
+| err / partial span | 2.99% | 1.25% | 1.22% | 2.08% | 12.76% |
+| **err / full output** | 2.39% | 0.63% | 0.51% | 1.19% | **0.33%** |
 
-|                        | q_proj       | k_proj       | gate_proj    |
-|------------------------|--------------|--------------|--------------|
-| tensor shape           | [2048, 1024] | [1024, 1024] | [3072, 1024] |
-| `w_absmax` (tensor)    | 0.6445       | 0.4336       | 0.3906       |
-| int8 levels used /127  | 57           | 51           | **96**       |
-| err vs span, max       | 2.99%        | 1.25%        | 1.22%        |
-| err vs span, mean      | 1.17%        | 0.35%        | 0.59%        |
-| per-channel err, max   | 0.46%        | 0.74%        | 0.87%        |
-| per-element rel, max   | 70%          | 398%         | **9.7%**     |
+**Read the last row, not the one above it.** A tile computes a partial
+sum over K, and normalising by that partial's span overstates the error
+when the tile is a small slice of the real dot product. `down_proj` is
+the extreme: it covers 16 of 3072 (1/192), and its partial output is
+2.6% of the true magnitude (0.0164 vs 0.636) — which makes it look like
+the worst tensor at 12.76% when its **absolute** error is the smallest
+of all five and it is the *best* against the real output at 0.33%.
+Same class of trap as the per-element relative error, one level up.
 
+The artifacts carry both, plus `k_total` and `k_tiles_for_full_output`,
+so the distinction cannot be lost.
 Two things worth noting. The **under-use of int8 range reproduces**
 (57 and 51 of 127), so it is a property of per-tensor scaling at tile
 0, not a quirk of one tensor. But the **per-channel win does not
@@ -217,6 +225,37 @@ Two things worth knowing, both verified rather than assumed:
   averaging 0.749 and entropy 0.66 nats against a 2.64 uniform bound —
   real cross-token mixing, so causal masking and softmax are actually
   exercised.
+
+## SwiGLU and down_proj's real input
+
+`down_proj` is the one tensor whose tile cannot be built from sliced
+matmuls. Its input is `silu(gate_proj(x)) * up_proj(x)` — the full
+3072-wide gated intermediate — so `forward_layer0_ffn()` computes both
+**full** 1024→3072 projections, applies SiLU and the elementwise
+product, and only then takes the 16 values tile 0 consumes.
+`up_proj` by contrast shares `gate_proj`'s activation exactly and is
+mechanically the same as it.
+
+Two self-checks on the gate, both non-vacuous:
+
+- **Sign identity (exact).** `sign(silu(x)) == sign(x)` for all x, so
+  `sign(inter)` must equal `sign(g)·sign(u)` everywhere. An algebraic
+  identity, not a tolerance — catches a flipped sign, swapped
+  gate/up, or SiLU on the wrong operand.
+- **Collapse where the gate is strongly negative**, against a *tight
+  analytic* bound rather than a guessed constant: `|silu|` peaks near
+  x = −1.278 and decreases monotonically as x → −∞, so for all
+  `g ≤ t` the exact supremum is `|silu(t)|`. Measured 0.0681 against
+  the bound 0.0719 at t = −4.
+
+A note on the second one: **SiLU is not monotonic** — it dips to about
+−0.278 near x = −1.278 — so monotonicity is the wrong property to lean
+on. The sign identity is what actually holds, and the collapse bound
+follows from the tail behaviour rather than from monotonicity.
+
+The threshold was also empirically chosen: an initial t = −8 made the
+check **vacuous** (gate min is −5.11), and the non-vacuity assert caught
+it rather than letting it silently pass.
 
 ## Why no torch
 

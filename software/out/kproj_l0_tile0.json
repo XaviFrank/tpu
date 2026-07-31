@@ -282,7 +282,15 @@
     "err_vs_span_mean": 0.0035396884478508914,
     "per_element_rel_max": 3.9822439565782615,
     "int8_levels_used_by_slice": 51,
-    "per_channel_err_vs_span_max": 0.007422033788668016
+    "per_channel_err_vs_span_max": 0.007422033788668016,
+    "k_covered_by_tile": 16,
+    "k_total": 1024,
+    "k_tiles_for_full_output": 64,
+    "full_output_span_absmax": 0.917641047937073,
+    "partial_span_fraction_of_full": 0.5022768043705125,
+    "err_vs_full_output_span_max": 0.006263730117834005,
+    "err_vs_full_output_span_mean": 0.001777903402053765,
+    "partial_sum_note": "this tile is a partial sum over K; err_vs_span_* normalises by the PARTIAL span and overstates error when the tile covers a small fraction of K. Use err_vs_full_output_span_* to compare across tensors."
   },
   "n_vecs": 1
 }
