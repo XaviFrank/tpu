@@ -81,9 +81,22 @@ module rmsnorm #(
     output logic [$clog2(N)-1:0]    x_rd_addr,
     input  logic signed [IN_W-1:0]  x_rd_data,
 
+    // eps ALREADY IN mean_square UNITS - see the header. Per-site, so
+    // it is supplied here rather than baked in.
+    input  logic [ACC_W-1:0]        eps_fixed,
+
     // stage 1-2 result: mean(x^2), held until the next go
     output logic                    ms_valid,
-    output logic [ACC_W-1:0]        mean_square
+    output logic [ACC_W-1:0]        mean_square,
+
+    // stage 3 result: 1/sqrt(mean_square + eps) as mantissa + shift,
+    //   normalizer ~= nrm_mant / 2**nrm_shift
+    // Kept in that form rather than one fixed-point word because the
+    // exponent range is far too wide for a single format: measured M
+    // spans about 2^22..2^26 across the two layer-0 sites alone.
+    output logic                    nrm_valid,
+    output logic [17:0]             nrm_mant,
+    output logic [5:0]              nrm_shift
 );
 
     localparam int AW    = $clog2(N);
@@ -106,7 +119,9 @@ module rmsnorm #(
         end
     end
 
-    typedef enum logic [1:0] { S_IDLE, S_SUM, S_TAIL, S_DONE } state_t;
+    typedef enum logic [3:0] {
+        S_IDLE, S_SUM, S_TAIL, S_ACC, S_R1, S_R2, S_R3, S_R4, S_DONE
+    } state_t;
     state_t state;
 
     logic [AW-1:0] addr;
@@ -120,6 +135,7 @@ module rmsnorm #(
             addr        <= '0;
             land        <= 1'b0;
             ms_valid    <= 1'b0;
+            nrm_valid   <= 1'b0;
         end else begin
             land <= x_rd_en;
             case (state)
@@ -128,6 +144,7 @@ module rmsnorm #(
                         state       <= S_SUM;
                         addr        <= '0;
                         ms_valid    <= 1'b0;
+                        nrm_valid   <= 1'b0;
                     end
                 end
                 S_SUM: begin
@@ -138,11 +155,24 @@ module rmsnorm #(
                     end
                 end
                 S_TAIL: begin
-                    state <= S_DONE;             // the final element lands here
+                    state <= S_ACC;              // final element's rd_data lands here
                 end
+                S_ACC: begin
+                    // and its PRODUCT lands here, so acc is only final
+                    // at the end of this cycle. Starting rsqrt any earlier
+                    // reads an accumulator short by one element - which
+                    // biases the normalizer by ~1/N and is invisible to any
+                    // check that only reads mean_square at ms_valid.
+                    state <= S_R1;
+                end
+                S_R1:   state <= S_R2;
+                S_R2:   state <= S_R3;
+                S_R3:   state <= S_R4;
+                S_R4:   state <= S_DONE;
                 S_DONE: begin
-                    ms_valid <= 1'b1;
-                    state    <= S_IDLE;
+                    ms_valid  <= 1'b1;
+                    nrm_valid <= 1'b1;
+                    state     <= S_IDLE;
                 end
                 default: state <= S_IDLE;
             endcase
@@ -177,5 +207,80 @@ module rmsnorm #(
 
     // stage 2: mean = acc >> log2(N). Free.
     assign mean_square = acc >> LOG2N;
+
+
+    //----------------------------------------------------------------
+    // Stage 3: normalizer = 1/sqrt(mean_square + eps).
+    //
+    //   M is normalised to norm = M >> sh with sh EVEN, so norm lands
+    //   in [2^30, 2^32) and u = norm/2^30 lies in [1,4). Then
+    //   1/sqrt(M) = (1/sqrt(u)) * 2^-((30+sh)/2), and because sh is
+    //   even that trailing term is an integer shift - which is why the
+    //   normalisation steps two bits at a time rather than one.
+    //
+    //   A 256-entry seed LUT (rsqrt_lut.memh, from tb/gen_rsqrt_lut.py)
+    //   gives ~8 correct bits, then ONE Newton-Raphson step
+    //   y1 = y0*(1.5 - 0.5*u*y0^2) roughly doubles that. Three
+    //   multiplies, all once per vector, so they cost nothing against
+    //   the 1024-wide elementwise stages.
+    //----------------------------------------------------------------
+    logic [ACC_W-1:0] mplus;
+    assign mplus = mean_square + eps_fixed;
+
+    logic [5:0] msb_pos;
+    always_comb begin
+        msb_pos = 6'd0;
+        for (int b = 0; b < ACC_W; b++)
+            if (mplus[b]) msb_pos = 6'(b);
+    end
+
+    logic signed [7:0] sh;
+    always_comb begin
+        if (msb_pos[0]) sh = $signed({2'b00, msb_pos}) - 8'sd31;  // odd MSB
+        else            sh = $signed({2'b00, msb_pos}) - 8'sd30;  // even MSB
+    end
+
+    logic [31:0] norm;
+    logic [6:0]  sh_abs;
+    assign sh_abs = sh[7] ? 7'(-sh) : 7'(sh);
+    always_comb begin
+        if (sh[7]) norm = 32'(mplus << sh_abs);
+        else       norm = 32'(mplus >> sh_abs);
+    end
+
+    (* rom_style = "block" *) logic [17:0] seed_lut [256];
+    initial $readmemh("rtl/rsqrt_lut.memh", seed_lut);
+
+    logic [17:0] y0;
+    logic [17:0] u18;
+    logic [35:0] t1;
+    logic [17:0] t1_16;
+    logic [35:0] t2;
+    logic [19:0] t3;
+    logic [37:0] y1_wide;
+
+    always_ff @(posedge clk) begin
+        if (state == S_R1) begin
+            y0        <= seed_lut[norm[31:24]];
+            u18       <= norm[31:14];                 // Q2.16, u in [1,4)
+            nrm_shift <= 6'(17 + ((30 + sh) >>> 1));
+        end
+        if (state == S_R2) t1      <= y0 * y0;        // Q2.34
+        if (state == S_R3) t2      <= u18 * t1_16;    // Q4.32, ~= 1.0
+        if (state == S_R4) y1_wide <= y0 * t3;
+    end
+
+    // y0 is Q1.17 with value <= 1, so y0^2 is Q2.34 and occupies up to
+    // bit 34 - taking [33:16] would DROP that bit and zero the Newton
+    // term, silently degrading the result to 1.5*y0. Shift by 18.
+    assign t1_16 = t1[35:18];                         // Q2.16
+    assign t3    = 20'(3 << 15) - 20'(t2[35:16] >> 1);   // 1.5 - 0.5*u*y0^2
+
+    // y1 = (y0*t3) >> 16, back to Q1.17. Saturate rather than wrap - an
+    // overshoot would otherwise become a silently tiny normalizer.
+    always_comb begin
+        if (|y1_wide[37:34]) nrm_mant = 18'h3FFFF;
+        else                 nrm_mant = y1_wide[33:16];
+    end
 
 endmodule
