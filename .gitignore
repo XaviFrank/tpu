@@ -1,3 +1,5 @@
 build/
 vivado/
 reports/
+software/qwen/
+software/__pycache__/
