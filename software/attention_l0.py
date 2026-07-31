@@ -73,8 +73,13 @@ def rotate_half(x):
     return np.concatenate([-x[..., h:], x[..., :h]], axis=-1)
 
 
-def main():
-    os.makedirs(OUT, exist_ok=True)
+def forward_layer0(ids):
+    """Full layer-0 attention for one token sequence.
+
+    Returns (gate_in, checks): gate_in is [T, hidden], the real input
+    to mlp.gate_proj / up_proj. Shared by main() (reporting) and by
+    quantize_pack.py (calibration), so both run identical math.
+    """
     cfg = json.load(open(os.path.join(CACHE, "config.json")))
     eps = cfg["rms_norm_eps"]
     H = cfg["hidden_size"]
@@ -89,17 +94,12 @@ def main():
 
     checks = {}
 
-    # ---- 1. tokens + embeddings ---------------------------------
-    from tokenizers import Tokenizer
-    tok = Tokenizer.from_file(fetch_file("tokenizer.json"))
-    ids = tok.encode(TEST_TEXT).ids
+    # ---- 1. embeddings for the given tokens ----------------------
     Tn = len(ids)
-    assert 8 <= Tn <= 24, f"sequence length {Tn} outside the intended 8-16ish"
     header, dstart = load_header()
     header.pop("__metadata__", None)
     rows = fetch_embed_rows(header, dstart, ids)
     x = np.stack([rows[int(t)] for t in ids]).astype(np.float64)   # [T, H]
-    print(f"sequence: {Tn} tokens -> {[tok.decode([i]) for i in ids]}")
 
     # ---- 2. input_layernorm --------------------------------------
     h = rmsnorm(x, T(L + "input_layernorm.weight"), eps)
@@ -175,6 +175,7 @@ def main():
     future_max = float(np.abs(future).max()) if future.size else 0.0
     checks["causal_future_weight_max"] = future_max
     checks["causal_future_exactly_zero"] = bool(np.all(future == 0.0))
+    checks["causal_masked_entries"] = int(future.size)
     assert np.all(future == 0.0), f"future attention not exactly 0 (max {future_max})"
     # and the mask must be non-trivial, i.e. the sequence really is multi-token
     assert future.size > 0, "no masked positions - sequence is degenerate"
@@ -214,11 +215,39 @@ def main():
     gate_in = rmsnorm(xr, T(L + "post_attention_layernorm.weight"), eps)
     assert gate_in.shape == (Tn, H)
 
+    checks["seq_len"] = Tn
+    checks["intermediates"] = {
+        nm: [float(np.abs(arr).max()), float(arr.std())]
+        for nm, arr in [("embedding", x), ("input_layernorm", h),
+                        ("q_post_rope", q), ("k_post_rope", k), ("v", v),
+                        ("attn_out", attn), ("o_proj", o), ("residual", xr),
+                        ("gate_proj_input", gate_in)]
+    }
+    return gate_in, checks
+
+
+def main():
+    os.makedirs(OUT, exist_ok=True)
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(fetch_file("tokenizer.json"))
+    ids = tok.encode(TEST_TEXT).ids
+    Tn = len(ids)
+    assert 8 <= Tn <= 24, f"sequence length {Tn} outside the intended 8-16ish"
+    print(f"sequence: {Tn} tokens -> {[tok.decode([i]) for i in ids]}")
+
+    gate_in, checks = forward_layer0(ids)
+    H = gate_in.shape[1]
+    n_rep = 2
+    dq = checks["rope_norm_preserved_q"]
+    dk = checks["rope_norm_preserved_k"]
+    row_err = checks["softmax_row_sum_max_err"]
+    future_size = checks["causal_masked_entries"]
+
     # ---- report ---------------------------------------------------
     print("\nself-checks (spec section 4):")
     print(f"  RoPE norm preservation   q max delta {dq:.3e}, k max delta {dk:.3e}  -> PASS")
     print(f"  softmax row sums         max |sum-1| = {row_err:.3e}                 -> PASS")
-    print(f"  causal future weights    exactly zero over {future.size} masked entries -> PASS")
+    print(f"  causal future weights    exactly zero over {future_size} masked entries -> PASS")
     print(f"  GQA head mapping         matches repeat_interleave (j -> j//{n_rep})  -> PASS")
     print(f"    and the tile convention would have differed, so the check bites")
     print(f"  attn within hull of V    every component inside per-dim min/max     -> PASS")
@@ -231,11 +260,8 @@ def main():
               checks['attn_entropy_mean_nats'], np.log(Tn)))
 
     print("\nintermediate magnitudes (sanity, not assertions):")
-    for nm, arr in [("embedding x", x), ("input_layernorm", h), ("q post-RoPE", q),
-                    ("k post-RoPE", k), ("v", v), ("attn out", attn),
-                    ("o_proj", o), ("residual", xr), ("GATE_PROJ INPUT", gate_in)]:
-        print(f"  {nm:18s} shape {str(arr.shape):16s} absmax {np.abs(arr).max():10.5f} "
-              f"std {arr.std():9.5f}")
+    for nm, (amax, sd) in checks["intermediates"].items():
+        print(f"  {nm:18s} absmax {amax:10.5f}   std {sd:9.5f}")
 
     np.save(os.path.join(OUT, "gate_proj_input_l0.npy"), gate_in.astype(np.float32))
     meta = {

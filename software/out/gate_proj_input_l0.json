@@ -43,11 +43,51 @@
     "softmax_row_sum_max_err": 2.220446049250313e-16,
     "causal_future_weight_max": 0.0,
     "causal_future_exactly_zero": true,
+    "causal_masked_entries": 1456,
     "attn_within_convex_hull_of_v": true,
     "attn_peak_weight_mean": 0.7485482524361153,
     "attn_frac_rows_over_0p99": 0.3392857142857143,
     "attn_entropy_mean_nats": 0.6621140795188865,
-    "attn_entropy_uniform_bound_nats": 2.6390573296152584
+    "attn_entropy_uniform_bound_nats": 2.6390573296152584,
+    "seq_len": 14,
+    "intermediates": {
+      "embedding": [
+        0.1396484375,
+        0.02861641363309466
+      ],
+      "input_layernorm": [
+        2.8534747509755842,
+        0.21104924293334018
+      ],
+      "q_post_rope": [
+        30.89069644289117,
+        2.278866128709374
+      ],
+      "k_post_rope": [
+        468.5205044144607,
+        20.8868468044475
+      ],
+      "v": [
+        1.129495176608267,
+        0.15176257840220517
+      ],
+      "attn_out": [
+        0.9172045397974169,
+        0.1257713634757871
+      ],
+      "o_proj": [
+        2.9256587569973016,
+        0.19332307087669337
+      ],
+      "residual": [
+        2.8714595382473016,
+        0.19553263769563653
+      ],
+      "gate_proj_input": [
+        10.025493940282624,
+        0.4438329836284895
+      ]
+    }
   },
   "conventions_verified_against": "huggingface transformers modeling_qwen3.py (fetched), config.json",
   "gate_proj_input_absmax": 10.025493940282624,

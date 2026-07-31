@@ -31,6 +31,7 @@ Run in order:
 python fetch_qwen.py
 python quantize_pack.py q_proj      # default
 python quantize_pack.py k_proj
+python quantize_pack.py gate_proj  # needs attention_l0 for its activation
 ```
 
 One parameterized script handles both, rather than a copy per tensor —
@@ -114,21 +115,22 @@ error reads 70% max — but only on columns where the result is near zero
 explodes there while absolute error stays flat. Use the span-normalised
 figures; the artifact carries both plus a note.
 
-### Second data point: k_proj (GQA-asymmetric, 1024→1024)
+### Three tensors, same code
 
 Same code, different shape — `k_proj` is `[1024, 1024]` against
 `q_proj`'s `[2048, 1024]`, because Qwen3 has 8 KV heads to 16 Q heads.
 Nothing in the packer is shape-aware; only "input dim == hidden" and
 "both dims tile at 16" are asserted.
 
-|                        | q_proj        | k_proj        |
-|------------------------|---------------|---------------|
-| tensor shape           | [2048, 1024]  | [1024, 1024]  |
-| `w_absmax` (tensor)    | 0.6445        | 0.4336        |
-| int8 levels used /127  | 57            | 51            |
-| err vs span, max       | 2.99%         | 1.25%         |
-| err vs span, mean      | 1.17%         | 0.35%         |
-| per-channel err, max   | 0.46%         | 0.74%         |
+|                        | q_proj       | k_proj       | gate_proj    |
+|------------------------|--------------|--------------|--------------|
+| tensor shape           | [2048, 1024] | [1024, 1024] | [3072, 1024] |
+| `w_absmax` (tensor)    | 0.6445       | 0.4336       | 0.3906       |
+| int8 levels used /127  | 57           | 51           | **96**       |
+| err vs span, max       | 2.99%        | 1.25%        | 1.22%        |
+| err vs span, mean      | 1.17%        | 0.35%        | 0.59%        |
+| per-channel err, max   | 0.46%        | 0.74%        | 0.87%        |
+| per-element rel, max   | 70%          | 398%         | **9.7%**     |
 
 Two things worth noting. The **under-use of int8 range reproduces**
 (57 and 51 of 127), so it is a property of per-tensor scaling at tile
@@ -138,6 +140,27 @@ per-channel result is actually *worse* in absolute terms than
 q_proj's. Per-channel helps most where row magnitudes are widely
 spread; it is still the right direction, but "6.5× better" was a
 one-tensor number and should not be extrapolated.
+
+**gate_proj needed its own calibration, and the numbers show why.**
+Its input is `post_attention_layernorm(embed + attn_out)`, computed
+through the verified attention block in `attention_l0.py` — not the
+`input_layernorm(embed)` shortcut Q/K/V use. Measured absmax is
+**10.03 against Q/K/V's 3.19**, so `a_scale` is 3.14× larger. Reusing
+the Q/K/V scale would have clipped nothing but wasted about two thirds
+of the int8 range.
+
+Two things fall out of the third data point:
+
+- **The int8-range under-use is not universal.** gate_proj reaches
+  **96 of 127** levels where q_proj managed 57 and k_proj 51, because
+  its tile-0 absmax (0.295) sits close to its tensor absmax (0.391).
+  So per-tensor scaling is only wasteful when tile 0 happens to be
+  unrepresentative — worth measuring per tensor rather than assuming.
+- **The relative-error story holds up.** gate_proj's per-element
+  relative error is only **9.7%** max, against 70% and 398% for q/k.
+  Same code, same metric — the difference is that gate_proj's outputs
+  do not cancel to near-zero. That is direct evidence the earlier
+  alarming figures were dot-product cancellation, not a defect.
 
 **Why per-tensor anyway.** On q_proj the weight scale comes from the
 full tensor (|max| 0.645) while tile 0 only reaches 0.289, so the slice

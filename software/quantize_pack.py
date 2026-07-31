@@ -81,6 +81,19 @@ CALIB_TEXTS = [
 TENSORS = {
     "q_proj": "model.layers.0.self_attn.q_proj.weight",
     "k_proj": "model.layers.0.self_attn.k_proj.weight",
+    "gate_proj": "model.layers.0.mlp.gate_proj.weight",
+}
+
+# Where each tensor's input activation comes from. Q/K/V read
+# input_layernorm(embed) directly. gate_proj does NOT - its input is
+# post_attention_layernorm(embed + attention_out), so it needs the full
+# verified attention block, and its own a_scale: measured absmax is
+# 10.03 post-attention vs 3.19 pre-attention, so reusing Q/K/V's scale
+# would waste most of the int8 range.
+ACT_SOURCE = {
+    "q_proj": "attn_in",
+    "k_proj": "attn_in",
+    "gate_proj": "mlp_in",
 }
 
 
@@ -117,7 +130,14 @@ def main():
     header.pop("__metadata__", None)
     rows = fetch_embed_rows(header, data_start, all_ids)
 
-    acts = np.stack([rmsnorm(rows[int(t)], gamma, eps) for t in all_ids])
+    if ACT_SOURCE[which] == "attn_in":
+        acts = np.stack([rmsnorm(rows[int(t)], gamma, eps) for t in all_ids])
+    else:
+        # full attention per sequence - position matters here, so this
+        # cannot be done per unique token the way attn_in can be
+        from attention_l0 import forward_layer0
+        per_seq = [forward_layer0(s)[0] for s in seqs]
+        acts = np.concatenate(per_seq, axis=0)
     a_absmax = float(np.abs(acts).max())
     a_p999 = float(np.percentile(np.abs(acts), 99.9))
 
@@ -129,7 +149,12 @@ def main():
     # a real in-context token, chosen deterministically so the artifact
     # is reproducible.
     sample_tok = int(seqs[0][-1])
-    a_full = rmsnorm(rows[sample_tok], gamma, eps)
+    if ACT_SOURCE[which] == "attn_in":
+        a_full = rmsnorm(rows[sample_tok], gamma, eps)
+    else:
+        # same rule - last position of the first sequence - but the value
+        # depends on the whole preceding context, not just the token id
+        a_full = per_seq[0][-1]
     a_slice = a_full[:K]
     print(f"  sample token id  = {sample_tok} "
           f"({tok.decode([sample_tok])!r}), slice |max| = "
@@ -235,7 +260,13 @@ def main():
                       "note": "one 16x16 tile of the real tensor; the "
                               "bitstream is single-tile ws_tpu_top"},
             "activation": {
-                "definition": "input_layernorm(embed_tokens[token]) - layer 0 only",
+                "definition": ("input_layernorm(embed_tokens[token])"
+                               " - layer 0 only")
+                              if ACT_SOURCE[which] == "attn_in" else
+                              ("post_attention_layernorm(embed + o_proj(attn(...)))"
+                               " - real layer-0 attention output, see attention_l0.py"),
+                "source": ACT_SOURCE[which],
+                "position": "last token of calibration sequence 0",
                 "token_id": sample_tok,
                 "token_text": tok.decode([sample_tok]),
             },

@@ -19,6 +19,8 @@
     },
     "activation": {
       "definition": "input_layernorm(embed_tokens[token]) - layer 0 only",
+      "source": "attn_in",
+      "position": "last token of calibration sequence 0",
       "token_id": 13,
       "token_text": "."
     }
