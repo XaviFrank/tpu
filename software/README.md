@@ -20,8 +20,9 @@ artifact on the board happens separately in the notebook.
 ```
 fetch_qwen.py       range-fetch the needed tensors from HF safetensors
 quantize_pack.py    calibrate, quantize, pack, golden, emit artifact
+attention_l0.py     real layer-0 attention forward -> gate_proj's input
 qwen/               download cache (gitignored, ~19 MB)
-out/                the deliverable (committed, ~15 KB)
+out/                the deliverables (committed)
 ```
 
 Run in order:
@@ -145,6 +146,55 @@ per-tensor is what a real deployment of the whole tensor uses, and a
 slice-local scale would flatter the proof. The numbers above are
 reported so the trade is visible, not hidden.
 
+## Real attention forward (`attention_l0.py`)
+
+Q/K/V were free — their input is `input_layernorm(embed_tokens[t])` and
+nothing else. `gate_proj` is not: its input is
+`post_attention_layernorm(embedding + attention_output)`, so producing
+it means computing the whole attention block in numpy — QK-norm, RoPE,
+GQA, causal softmax, O-proj, residual.
+
+Output: `out/gate_proj_input_l0.npy` `[14, 1024]` float32 plus a
+metadata/self-check JSON. **Activations only** — not quantized, not
+packed, no hardware artifact; that is the follow-up.
+
+**Every convention was read out of the real HF source, not recalled.**
+`qwen/modeling_qwen3.py` is fetched from transformers `main` and cited
+by line number in the module docstring. The ones that would have been
+silently wrong from memory:
+
+- **`repeat_kv` is `repeat_interleave`** (175–184), so Q head `j` uses
+  KV head `j // n_rep` — *not* `j % n_kv`. Both are plausible; only one
+  is right.
+- **`rotate_half` is half-split** (142–146), `cat(-x[64:], x[:64])` —
+  not the interleaved-pairs RoPE variant.
+- **QK-norm applies after projection and before RoPE** (254–256), over
+  `head_dim` only, and **V is not normed**.
+- Residual is against the **pre-norm** input (306–324).
+
+### Self-check results
+
+| check | result |
+|---|---|
+| RoPE preserves L2 norm | q 7.1e-15, k 1.1e-13 |
+| softmax rows sum to 1 | max err 2.2e-16 |
+| future attention weights | **exactly** 0.0 over 1456 masked entries |
+| GQA map == `repeat_interleave` | true, and the tile variant *would* have differed |
+| attn output inside convex hull of V | true |
+
+The GQA check deliberately also asserts the wrong convention would
+produce different numbers — otherwise it would pass vacuously.
+
+Two things worth knowing, both verified rather than assumed:
+
+- **`k_norm` gamma really does reach 96.5** (3 of 128 channels above
+  10), which is why post-RoPE `k` reaches ~468 against `q`'s ~31. That
+  asymmetry is a genuine property of the learned weights.
+- **The sequence is not degenerate.** 14 tokens, peak attention weight
+  averaging 0.749 and entropy 0.66 nats against a 2.64 uniform bound —
+  real cross-token mixing, so causal masking and softmax are actually
+  exercised.
+
 ## Why no torch
 
 `fetch_qwen.py` reads the safetensors header and pulls only the byte
@@ -152,10 +202,11 @@ ranges it needs — about 4 MB out of a 1.2 GB file — and converts
 bfloat16 by shifting into float32. That keeps the whole pipeline on
 `numpy` + `tokenizers` instead of a multi-GB install.
 
-**The limit this hits:** layers 1–27 need a real forward pass to know
-their activations, which this cannot do. Extending calibration past
-layer 0 means installing torch/transformers or implementing the
-transformer block in numpy. Layer 0 is exact precisely because nothing
+**The limit this hits:** layers 1–27 need a full forward pass to know
+their activations. `attention_l0.py` now implements one layer's
+attention in numpy, so the remaining gap for layer 1+ is the MLP
+(SwiGLU) and then iterating the block — no longer a torch dependency,
+just more work. Layer 0 needed none of it for Q/K/V because nothing
 precedes it.
 
 ## Deferred (not oversights)
@@ -166,7 +217,8 @@ precedes it.
   `ws_tpu_top`, hence one 16×16 tile here.
 - **Per-channel weight scales** — quantified above; 6.5× on q_proj but
   only 1.7× on k_proj, so measure per tensor rather than assuming.
-- **Calibration beyond layer 0** — needs a forward pass.
+- **Calibration beyond layer 0** — needs SwiGLU plus block iteration;
+  attention itself is now done in numpy.
 - **RMSNorm gamma** — elementwise, never touches the array; own spec.
 - **Embeddings / LM head** — a gather, not a matmul. Note
   `tie_word_embeddings: true`, so there is no separate LM-head tensor.
