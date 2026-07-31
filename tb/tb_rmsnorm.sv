@@ -53,6 +53,15 @@ module tb_rmsnorm;
     logic                    nrm_valid;
     logic [17:0]             nrm_mant;
     logic [5:0]              nrm_shift;
+    logic                    g_rd_en;
+    logic [AW-1:0]           g_rd_addr;
+    logic signed [15:0]      g_rd_data;
+    logic                    relu_en;
+    logic signed [15:0]      scale_mult;
+    logic [4:0]              shift_amt;
+    logic                    out_valid;
+    logic signed [7:0]       out_data;
+    logic [AW-1:0]           out_idx;
 
     rmsnorm #(.N(N), .IN_W(IN_W), .ACC_W(ACC_W)) dut (
         .clk         (clk),
@@ -67,8 +76,33 @@ module tb_rmsnorm;
         .mean_square (mean_square),
         .nrm_valid   (nrm_valid),
         .nrm_mant    (nrm_mant),
-        .nrm_shift   (nrm_shift)
+        .nrm_shift   (nrm_shift),
+        .g_rd_en     (g_rd_en),
+        .g_rd_addr   (g_rd_addr),
+        .g_rd_data   (g_rd_data),
+        .relu_en     (relu_en),
+        .scale_mult  (scale_mult),
+        .shift_amt   (shift_amt),
+        .out_valid   (out_valid),
+        .out_data    (out_data),
+        .out_idx     (out_idx)
     );
+    // gamma buffer, same 1-cycle latency as the x buffer
+    logic signed [15:0] gmem [N];
+    always_ff @(posedge clk) begin
+        if (g_rd_en) g_rd_data <= gmem[g_rd_addr];
+    end
+
+    // collect the INT8 stream by the index the DUT reports
+    int got8 [N];
+    int got_n;
+    always_ff @(posedge clk) begin
+        if (out_valid) begin
+            got8[out_idx] <= int'(out_data);
+            got_n         <= got_n + 1;
+        end
+    end
+
 
     // external x buffer, 1-cycle read latency (tile_buffer's contract)
     logic signed [IN_W-1:0] xmem [N];
@@ -78,6 +112,14 @@ module tb_rmsnorm;
 
     task automatic run_and_check(input [ACC_W-1:0] expect_ms, input string name);
         int guard;
+        // the DUT runs pass 2 for another N cycles after ms_valid, so a
+        // new go must wait for idle - go is only sampled in S_IDLE and
+        // would otherwise be silently dropped
+        while (busy) @(negedge clk);
+            // zero the collector only once the PREVIOUS run has fully
+            // drained - every go runs pass 2, so a leftover stream would
+            // otherwise inflate got_n and end this run's wait early
+            got_n = 0;
         @(negedge clk) go = 1'b1;
         @(negedge clk) go = 1'b0;
         guard = 0;
@@ -110,6 +152,14 @@ module tb_rmsnorm;
         int j;
         for (j = 0; j < N; j++) xmem[j] = c;
         eps_fixed = eps;
+        // the DUT runs pass 2 for another N cycles after ms_valid, so a
+        // new go must wait for idle - go is only sampled in S_IDLE and
+        // would otherwise be silently dropped
+        while (busy) @(negedge clk);
+            // zero the collector only once the PREVIOUS run has fully
+            // drained - every go runs pass 2, so a leftover stream would
+            // otherwise inflate got_n and end this run's wait early
+            got_n = 0;
         @(negedge clk) go = 1'b1;
         @(negedge clk) go = 1'b0;
         j = 0;
@@ -139,11 +189,16 @@ module tb_rmsnorm;
         end
     endtask
 
+    logic [7:0]  exp8 [N];
+    logic [47:0] prm  [3];
     integer i;
     longint unsigned acc_exp;
 
     initial begin
         rst_n = 0; go = 0; eps_fixed = '0;
+        relu_en = 1'b0; scale_mult = 16'sd1; shift_amt = 5'd0;
+        got_n = 0;
+        for (i = 0; i < N; i++) begin gmem[i] = 16'sd16384; got8[i] = 0; end
         for (i = 0; i < N; i++) xmem[i] = 16'sd0;
         repeat (3) @(negedge clk);
         rst_n = 1;
@@ -217,6 +272,59 @@ module tb_rmsnorm;
             // eps dominating a tiny mean_square - the degenerate end
             check_rsqrt(16'sd1,     48'd55054, "eps dominates",   worst);
             $display("PASS [B] rsqrt worst relative error over sweep: %e", worst);
+        end
+
+        //--- C: FULL PIPELINE vs the verified numpy golden ----------
+        // Real Qwen3-0.6B layer-0 site-1 data: a real token embedding
+        // as INT16, the real learned input_layernorm gamma as Q2.14,
+        // eps and the requant config all derived from real calibration
+        // (tb/gen_rmsnorm_vectors.py). The golden comes from the numpy
+        // rmsnorm() already verified in the attention work - not
+        // re-derived here, per spec section 4.
+        begin
+            int exact, worst, d, j;
+            $readmemh("tb/rmsnorm_x.memh",      xmem);
+            $readmemh("tb/rmsnorm_gamma.memh",  gmem);
+            $readmemh("tb/rmsnorm_exp.memh",    exp8);
+            $readmemh("tb/rmsnorm_params.memh", prm);
+            eps_fixed  = prm[0];
+            scale_mult = prm[1][15:0];
+            shift_amt  = prm[2][4:0];
+            relu_en    = 1'b0;
+
+            while (busy) @(negedge clk);
+            // zero the collector only once the PREVIOUS run has fully
+            // drained - every go runs pass 2, so a leftover stream would
+            // otherwise inflate got_n and end this run's wait early
+            got_n = 0;
+            @(negedge clk) go = 1'b1;
+            @(negedge clk) go = 1'b0;
+            j = 0;
+            while (got_n < N) begin
+                @(negedge clk);
+                j = j + 1;
+                if (j > 4*N) begin
+                    errors++;
+                    $error("[C] only %0d of %0d outputs produced", got_n, N);
+                    break;
+                end
+            end
+
+            exact = 0; worst = 0;
+            for (j = 0; j < N; j++) begin
+                d = got8[j] - $signed(exp8[j][7:0]);
+                if (d < 0) d = -d;
+                if (d == 0) exact = exact + 1;
+                if (d > worst) worst = d;
+                if (d > 1) begin
+                    errors++;
+                    $error("[C] element %0d: got %0d, golden %0d (diff %0d)",
+                           j, got8[j], $signed(exp8[j][7:0]), d);
+                end
+            end
+            if (worst <= 1)
+                $display("PASS [C] full pipeline vs numpy golden: %0d/%0d exact, worst |diff| = %0d LSB",
+                         exact, N, worst);
         end
 
         repeat (2) @(negedge clk);

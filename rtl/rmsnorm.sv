@@ -68,7 +68,12 @@
 module rmsnorm #(
     parameter int N     = 1024,
     parameter int IN_W  = 16,
-    parameter int ACC_W = 48
+    parameter int ACC_W    = 48,
+    parameter int GAMMA_W  = 16,   // gamma format: Q2.14 SIGNED
+    parameter int GAMMA_F  = 14,   // site 2's gamma reaches -1.492, so
+                                   // the format must be signed, not unsigned
+    parameter int OUT_FRAC = 24,   // fractional bits handed to requant
+    parameter int RQ_PIPE  = 2
 )(
     input  logic clk,
     input  logic rst_n,
@@ -96,7 +101,22 @@ module rmsnorm #(
     // spans about 2^22..2^26 across the two layer-0 sites alone.
     output logic                    nrm_valid,
     output logic [17:0]             nrm_mant,
-    output logic [5:0]              nrm_shift
+    output logic [5:0]              nrm_shift,
+
+    // gamma buffer read port (Q2.14 signed, same 1-cycle latency)
+    output logic                    g_rd_en,
+    output logic [$clog2(N)-1:0]    g_rd_addr,
+    input  logic signed [GAMMA_W-1:0] g_rd_data,
+
+    // stage 6 requant config (per-site, same reasoning as eps_fixed)
+    input  logic                    relu_en,
+    input  logic signed [15:0]      scale_mult,
+    input  logic [4:0]              shift_amt,
+
+    // INT8 output stream, one element per cycle
+    output logic                    out_valid,
+    output logic signed [7:0]       out_data,
+    output logic [$clog2(N)-1:0]    out_idx
 );
 
     localparam int AW    = $clog2(N);
@@ -120,11 +140,14 @@ module rmsnorm #(
     end
 
     typedef enum logic [3:0] {
-        S_IDLE, S_SUM, S_TAIL, S_ACC, S_R1, S_R2, S_R3, S_R4, S_DONE
+        S_IDLE, S_SUM, S_TAIL, S_ACC, S_R1, S_R2, S_R3, S_R4, S_DONE,
+        S_P2, S_P2D
     } state_t;
     state_t state;
 
     logic [AW-1:0] addr;
+    logic [AW-1:0] addr2;          // pass 2 element index
+    logic [2:0]    drain;          // pass-2 pipeline drain counter
     logic          land;               // rd_data valid this cycle
     logic [ACC_W-1:0] acc;
 
@@ -133,6 +156,8 @@ module rmsnorm #(
         if (!rst_n) begin
             state       <= S_IDLE;
             addr        <= '0;
+            addr2       <= '0;
+            drain       <= 3'd5;
             land        <= 1'b0;
             ms_valid    <= 1'b0;
             nrm_valid   <= 1'b0;
@@ -143,6 +168,8 @@ module rmsnorm #(
                     if (go) begin
                         state       <= S_SUM;
                         addr        <= '0;
+                        addr2       <= '0;
+                        drain       <= 3'd5;
                         ms_valid    <= 1'b0;
                         nrm_valid   <= 1'b0;
                     end
@@ -172,7 +199,16 @@ module rmsnorm #(
                 S_DONE: begin
                     ms_valid  <= 1'b1;
                     nrm_valid <= 1'b1;
-                    state     <= S_IDLE;
+                    state     <= S_P2;      // straight into pass 2
+                end
+                S_P2: begin
+                    if (addr2 == ADDR_LAST) state <= S_P2D;
+                    else                    addr2 <= addr2 + 1'b1;
+                end
+                S_P2D: begin
+                    // drain the read -> multiply -> requant pipe
+                    if (drain == 3'd0) state <= S_IDLE;
+                    else               drain <= drain - 1'b1;
                 end
                 default: state <= S_IDLE;
             endcase
@@ -180,8 +216,10 @@ module rmsnorm #(
     end
 
     assign busy      = (state != S_IDLE);
-    assign x_rd_en   = (state == S_SUM);
-    assign x_rd_addr = addr;
+    assign x_rd_en   = (state == S_SUM) || (state == S_P2);
+    assign x_rd_addr = (state == S_P2) ? addr2 : addr;
+    assign g_rd_en   = (state == S_P2);
+    assign g_rd_addr = addr2;
 
     // datapath: no reset. The accumulator is cleared on go instead,
     // which also covers post-reset X (nothing reads it before ms_valid).
@@ -282,5 +320,94 @@ module rmsnorm #(
         if (|y1_wide[37:34]) nrm_mant = 18'h3FFFF;
         else                 nrm_mant = y1_wide[33:16];
     end
+
+
+    //----------------------------------------------------------------
+    // Stages 4-6: pass 2. One element per cycle.
+    //
+    //   out_real = x_i * gamma_i / sqrt(M)
+    //            = x_i * (gamma_q / 2^GAMMA_F) * (nrm_mant / 2^nrm_shift)
+    //
+    //   so both scalings are ONE combined shift at the end rather than
+    //   two rounded steps - shifting by nrm_shift before applying gamma
+    //   would throw away most of the mantissa (nrm_shift reaches 40).
+    //
+    //   The product is handed to requant as a fixed-point value with
+    //   OUT_FRAC fractional bits, i.e. out_real * 2^OUT_FRAC, and
+    //   requant's own scale_mult/shift_amt map that to INT8 at the
+    //   calibrated output scale. Splitting it this way keeps the
+    //   dynamic part (nrm_shift, which varies per vector) inside this
+    //   module and the static part (the output scale) in requant,
+    //   where every other call site already puts it.
+    //
+    //   requant runs at PIPE_STAGES=2 here, not 0. Its output is
+    //   captured synchronously, and an unpipelined requant driving a
+    //   flop is exactly the 8.355ns path that failed timing on
+    //   ws_tpu_top - see requant.sv's header.
+    //
+    //   DSP budget for this module: 1 (stage 1 x*x) + 3 (rsqrt) +
+    //   1 (x*gamma, 16x16) + 2 (that 32-bit product by the 18-bit
+    //   mantissa, which exceeds one DSP48's 27x18) + 2 (requant)
+    //   = 9. Confirm against the synth report rather than assuming.
+    //----------------------------------------------------------------
+    logic                       p2_v1, p2_v2, p2_v3;
+    logic [AW-1:0]              p2_i1, p2_i2, p2_i3;
+    logic signed [31:0]         m1;                    // x * gamma
+    logic signed [49:0]         m2;                    // * nrm_mant
+    logic signed [31:0]         acc_in;
+    logic signed [7:0]          rq_out;
+    logic [6:0]                 out_sh;
+
+    // total right shift: GAMMA_F + nrm_shift, less the fractional bits
+    // we deliberately keep for requant
+    assign out_sh = 7'(GAMMA_F) + 7'(nrm_shift) - 7'(OUT_FRAC);
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            p2_v1 <= 1'b0; p2_v2 <= 1'b0; p2_v3 <= 1'b0;
+        end else begin
+            p2_v1 <= (state == S_P2);
+            p2_v2 <= p2_v1;
+            p2_v3 <= p2_v2;
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        p2_i1 <= addr2;
+        p2_i2 <= p2_i1;
+        p2_i3 <= p2_i2;
+        m1    <= x_rd_data * g_rd_data;            // 16x16, 1 DSP
+        m2    <= m1 * $signed({1'b0, nrm_mant});   // 32x18, 2 DSPs
+    end
+
+    assign acc_in = 32'(m2 >>> out_sh);
+
+    requant #(
+        .ACC_WIDTH(32), .OUT_WIDTH(8), .SCALE_WIDTH(16), .SHIFT_WIDTH(5),
+        .PIPE_STAGES(RQ_PIPE)
+    ) u_rq (
+        .clk        (clk),
+        .acc_in     (acc_in),
+        .relu_en    (relu_en),
+        .scale_mult (scale_mult),
+        .shift_amt  (shift_amt),
+        .out        (rq_out)
+    );
+
+    // requant adds RQ_PIPE cycles, so the valid and index travel with it
+    logic [1:0]        rq_v;
+    logic [AW-1:0]     rq_i0, rq_i1;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) rq_v <= 2'b00;
+        else        rq_v <= {rq_v[0], p2_v3};
+    end
+    always_ff @(posedge clk) begin
+        rq_i0 <= p2_i3;
+        rq_i1 <= rq_i0;
+    end
+
+    assign out_valid = (RQ_PIPE == 2) ? rq_v[1] : ((RQ_PIPE == 1) ? rq_v[0] : p2_v3);
+    assign out_idx   = (RQ_PIPE == 2) ? rq_i1  : ((RQ_PIPE == 1) ? rq_i0  : p2_i3);
+    assign out_data  = rq_out;
 
 endmodule

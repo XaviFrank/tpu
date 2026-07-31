@@ -107,7 +107,7 @@ run_tb tb_axi_stream_to_buf_adapter rtl/tile_buffer.sv \
                          tb/tb_axi_stream_to_buf_adapter.sv
 
 # --- RMSNorm (first non-matmul unit) ---
-run_tb tb_rmsnorm        rtl/rmsnorm.sv tb/tb_rmsnorm.sv
+run_tb tb_rmsnorm        rtl/requant.sv rtl/rmsnorm.sv tb/tb_rmsnorm.sv
 
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
