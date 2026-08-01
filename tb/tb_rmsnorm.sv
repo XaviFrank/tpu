@@ -87,6 +87,53 @@ module tb_rmsnorm;
         .out_data    (out_data),
         .out_idx     (out_idx)
     );
+
+
+    //----------------------------------------------------------------
+    // QK-NORM: the SAME rmsnorm.sv at N=128 with its own GAMMA_F.
+    // No new RTL - QK-norm is RMSNorm over head_dim, and the module is
+    // already generic in N. The only thing that had to change is the
+    // gamma FORMAT: Q2.14 covers the hidden sites (absmax 1.05/1.49)
+    // but q_norm reaches 11.81 and k_norm 96.5, which Q2.14 would
+    // silently saturate at 2.0. GAMMA_F was already a parameter.
+    //----------------------------------------------------------------
+    localparam int N2 = 128;
+    localparam int AW2 = 7;
+    logic                    go2, busy2, ms_valid2, nrm_valid2, out_valid2;
+    logic                    lo2;
+    assign lo2 = 1'b0;
+    logic                    x2_rd_en, g2_rd_en;
+    logic [AW2-1:0]          x2_rd_addr, g2_rd_addr, out_idx2;
+    logic signed [IN_W-1:0]  x2_rd_data;
+    logic signed [15:0]      g2_rd_data;
+    logic [ACC_W-1:0]        mean_square2, eps_fixed2;
+    logic [17:0]             nrm_mant2;
+    logic [5:0]              nrm_shift2;
+    logic signed [15:0]      scale_mult2;
+    logic [4:0]              shift_amt2;
+    logic signed [7:0]       out_data2;
+
+    rmsnorm #(.N(N2), .IN_W(IN_W), .ACC_W(ACC_W), .GAMMA_F(11)) dut2 (
+        .clk (clk), .rst_n (rst_n), .go (go2), .busy (busy2),
+        .x_rd_en (x2_rd_en), .x_rd_addr (x2_rd_addr), .x_rd_data (x2_rd_data),
+        .eps_fixed (eps_fixed2), .ms_valid (ms_valid2), .mean_square (mean_square2),
+        .nrm_valid (nrm_valid2), .nrm_mant (nrm_mant2), .nrm_shift (nrm_shift2),
+        .g_rd_en (g2_rd_en), .g_rd_addr (g2_rd_addr), .g_rd_data (g2_rd_data),
+        .relu_en (lo2), .scale_mult (scale_mult2), .shift_amt (shift_amt2),
+        .out_valid (out_valid2), .out_data (out_data2), .out_idx (out_idx2));
+
+    logic signed [IN_W-1:0] xmem2 [N2];
+    logic signed [15:0]     gmem2 [N2];
+    logic [7:0]             exp2  [N2];
+    logic [47:0]            prm2  [4];
+    int got2 [N2];
+    int got_n2;
+    always_ff @(posedge clk) begin
+        if (x2_rd_en) x2_rd_data <= xmem2[x2_rd_addr];
+        if (g2_rd_en) g2_rd_data <= gmem2[g2_rd_addr];
+        if (out_valid2) begin got2[out_idx2] <= int'(out_data2); got_n2 <= got_n2 + 1; end
+    end
+
     // gamma buffer, same 1-cycle latency as the x buffer
     logic signed [15:0] gmem [N];
     always_ff @(posedge clk) begin
@@ -190,15 +237,18 @@ module tb_rmsnorm;
     endtask
 
     logic [7:0]  exp8 [N];
-    logic [47:0] prm  [3];
+    logic [47:0] prm  [4];
     integer i;
     longint unsigned acc_exp;
 
     initial begin
         rst_n = 0; go = 0; eps_fixed = '0;
+        go2 = 1'b0; eps_fixed2 = '0;
+        scale_mult2 = 16'sd1; shift_amt2 = 5'd0; got_n2 = 0;
         relu_en = 1'b0; scale_mult = 16'sd1; shift_amt = 5'd0;
         got_n = 0;
         for (i = 0; i < N; i++) begin gmem[i] = 16'sd16384; got8[i] = 0; end
+        for (i = 0; i < N2; i++) begin xmem2[i]='0; gmem2[i]='0; got2[i]=0; end
         for (i = 0; i < N; i++) xmem[i] = 16'sd0;
         repeat (3) @(negedge clk);
         rst_n = 1;
@@ -283,10 +333,10 @@ module tb_rmsnorm;
         // re-derived here, per spec section 4.
         begin
             int exact, worst, d, j;
-            $readmemh("tb/rmsnorm_x.memh",      xmem);
-            $readmemh("tb/rmsnorm_gamma.memh",  gmem);
-            $readmemh("tb/rmsnorm_exp.memh",    exp8);
-            $readmemh("tb/rmsnorm_params.memh", prm);
+            $readmemh("tb/rmsnorm_x_hidden.memh",      xmem);
+            $readmemh("tb/rmsnorm_gamma_hidden.memh",  gmem);
+            $readmemh("tb/rmsnorm_exp_hidden.memh",    exp8);
+            $readmemh("tb/rmsnorm_params_hidden.memh", prm);
             eps_fixed  = prm[0];
             scale_mult = prm[1][15:0];
             shift_amt  = prm[2][4:0];
@@ -325,6 +375,49 @@ module tb_rmsnorm;
             if (worst <= 1)
                 $display("PASS [C] full pipeline vs numpy golden: %0d/%0d exact, worst |diff| = %0d LSB",
                          exact, N, worst);
+        end
+
+        //--- E: QK-NORM on the SAME module at N=128 -----------------
+        // Real q_norm gamma and a real pre-norm attention head vector.
+        // If this passes, QK-norm needs no new RTL at all.
+        begin
+            int exact, worst, d, j;
+            $readmemh("tb/rmsnorm_x_qknorm.memh",      xmem2);
+            $readmemh("tb/rmsnorm_gamma_qknorm.memh",  gmem2);
+            $readmemh("tb/rmsnorm_exp_qknorm.memh",    exp2);
+            $readmemh("tb/rmsnorm_params_qknorm.memh", prm2);
+            eps_fixed2  = prm2[0];
+            scale_mult2 = prm2[1][15:0];
+            shift_amt2  = prm2[2][4:0];
+
+            while (busy2) @(negedge clk);
+            got_n2 = 0;
+            @(negedge clk) go2 = 1'b1;
+            @(negedge clk) go2 = 1'b0;
+            j = 0;
+            while (got_n2 < N2) begin
+                @(negedge clk);
+                j = j + 1;
+                if (j > 4*N2) begin
+                    errors++;
+                    $error("[E] only %0d of %0d outputs from the N=128 instance", got_n2, N2);
+                    break;
+                end
+            end
+            exact = 0; worst = 0;
+            for (j = 0; j < N2; j++) begin
+                d = got2[j] - $signed(exp2[j][7:0]);
+                if (d < 0) d = -d;
+                if (d == 0) exact = exact + 1;
+                if (d > worst) worst = d;
+                if (d > 1) begin
+                    errors++;
+                    $error("[E] element %0d: got %0d, golden %0d", j, got2[j], $signed(exp2[j][7:0]));
+                end
+            end
+            if (worst <= 1)
+                $display("PASS [E] QK-norm on the SAME module at N=128: %0d/%0d exact, worst |diff| = %0d LSB",
+                         exact, N2, worst);
         end
 
         repeat (2) @(negedge clk);

@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
-"""Generate real RMSNorm test vectors for tb_rmsnorm's full-pipeline check.
+"""Generate real RMSNorm test vectors for tb_rmsnorm.
 
-Uses the ACTUAL Qwen3-0.6B layer-0 site-1 RMSNorm - x is a real token
-embedding, gamma is the real learned input_layernorm weight - and the
-golden output comes from the numpy rmsnorm() in software/attention_l0.py,
-which is already verified (spec section 4: reuse it, do not re-derive
-the math for the TB).
+TWO SITES, BOTH DRIVING THE SAME rtl/rmsnorm.sv AT DIFFERENT N:
 
-Emits, all into tb/:
-    rmsnorm_x.memh       1024 x INT16   quantized residual-stream input
-    rmsnorm_gamma.memh   1024 x Q2.14   signed, per-channel
-    rmsnorm_exp.memh     1024 x INT8    expected output
-    rmsnorm_params.memh  eps_fixed, scale_mult, shift_amt (48-bit hex)
+  hidden   N=1024, layer-0 input_layernorm. x is a real token
+           embedding, gamma the real learned input_layernorm weight.
+
+  qknorm   N=128, layer-0 self_attn.q_norm. x is one real attention
+           head's PRE-norm q vector (projection output, before RoPE),
+           gamma the real learned q_norm weight.
+
+The second site exists to demonstrate that rmsnorm.sv is already
+generic in N: QK-norm is the same math over head_dim instead of the
+hidden size, so it needs no new RTL - only a different instantiation
+with its own eps_fixed and gamma, exactly as the two hidden-size sites
+already differ from one another.
+
+Golden for both is the numpy rmsnorm() in software/attention_l0.py,
+already verified in the attention work - not re-derived here.
+
+Emits into tb/, suffixed per site:
+    rmsnorm_x_<site>.memh       N x INT16   quantized input
+    rmsnorm_gamma_<site>.memh   N x Q2.14   signed, per-channel
+    rmsnorm_exp_<site>.memh     N x INT8    expected output
+    rmsnorm_params_<site>.memh  eps_fixed, scale_mult, shift_amt
 
 FORMATS - see rmsnorm.sv's header for why each is per-site
     x        INT16, LSB s_x = calib_absmax / 32767
-    gamma    Q2.14 SIGNED (site 2's gamma reaches -1.492)
+    gamma    Q2.14 SIGNED (the post_attention site's gamma reaches -1.492)
     eps      eps_float / s_x^2, i.e. already in mean_square units
-    output   INT8 at out_scale = output_absmax / 127, which the software
-             pipeline already measured as q/k/v's a_absmax
+    output   INT8 at out_scale = output_absmax / 127
 """
 
 import json
@@ -34,18 +45,52 @@ sys.path.insert(0, SOFT)
 from fetch_qwen import CACHE, fetch_embed_rows, fetch_file, load_header  # noqa: E402
 import attention_l0 as A                                                # noqa: E402
 
-N = 1024
 OUT_FRAC = 24
 QMAX8 = 127
 
+SITES = {
+    # site   -> (N,    gamma tensor,                            GAMMA_F, label)
+    # GAMMA_F is PER SITE. Q2.14 covers the hidden sites (absmax 1.05
+    # and 1.49) but NOT QK-norm: q_norm reaches 11.81 and k_norm 96.5,
+    # which Q2.14 would silently saturate at 2.0. rmsnorm.sv already
+    # parameterizes GAMMA_F, so this costs no RTL change.
+    "hidden": (1024, "model.layers.0.input_layernorm.weight", 14, "input_layernorm"),
+    "qknorm": (128,  "model.layers.0.self_attn.q_norm.weight", 11, "q_norm over head_dim"),
+}
+
+
+def site_vectors(site, seqs, rows, eps, cfg):
+    """Return (all_calibration_vectors, the_one_under_test), float."""
+    emb_per_seq = [np.stack([rows[int(t)] for t in s]).astype(np.float64)
+                   for s in seqs]
+    if site == "hidden":
+        allv = np.concatenate(emb_per_seq)
+        return allv, rows[int(seqs[0][-1])].astype(np.float64)
+
+    # qknorm: exactly what forward_layer0 feeds q_norm - the q
+    # projection output reshaped to heads, before RoPE.
+    hd = cfg["head_dim"]
+    nq = cfg["num_attention_heads"]
+    g_in = A.T("model.layers.0.input_layernorm.weight")
+    Wq = A.T("model.layers.0.self_attn.q_proj.weight")
+    allv = []
+    for x in emb_per_seq:
+        h = A.rmsnorm(x, g_in, eps)
+        allv.append((h @ Wq.T).reshape(-1, hd))
+    allv = np.concatenate(allv)
+    return allv, allv[0]
+
 
 def main():
+    site = sys.argv[1] if len(sys.argv) > 1 else "hidden"
+    assert site in SITES, f"unknown site {site}; pick from {list(SITES)}"
+    N, gamma_name, gamma_f_bits, label = SITES[site]
+
     cfg = json.load(open(os.path.join(CACHE, "config.json")))
     eps = cfg["rms_norm_eps"]
+    gamma_f = A.T(gamma_name)
+    assert gamma_f.shape == (N,), (gamma_f.shape, N)
 
-    gamma_f = A.T("model.layers.0.input_layernorm.weight")
-
-    # real tokens -> real embeddings, exactly as the calibration does
     from tokenizers import Tokenizer
     from quantize_pack import CALIB_TEXTS
     tok = Tokenizer.from_file(fetch_file("tokenizer.json"))
@@ -54,26 +99,21 @@ def main():
     hdr, ds = load_header()
     hdr.pop("__metadata__", None)
     rows = fetch_embed_rows(hdr, ds, ids)
-    emb = np.stack([rows[int(t)] for t in ids]).astype(np.float64)
 
-    # scales from the CALIBRATION SET, not from the one vector under
-    # test - a per-vector scale would flatter the result
-    x_absmax = float(np.abs(emb).max())
+    allv, x_f = site_vectors(site, seqs, rows, eps, cfg)
+
+    # scales from the CALIBRATION SET, not the single vector under test
+    x_absmax = float(np.abs(allv).max())
     s_x = x_absmax / 32767.0
-    out_absmax = float(np.abs(A.rmsnorm(emb, gamma_f, eps)).max())
+    out_absmax = float(np.abs(A.rmsnorm(allv, gamma_f, eps)).max())
     out_scale = out_absmax / QMAX8
 
-    # the vector under test: last token of the first sequence, the same
-    # deterministic pick the packing artifacts use
-    x_f = rows[int(seqs[0][-1])].astype(np.float64)
-
     x_q = np.clip(np.rint(x_f / s_x), -32768, 32767).astype(np.int64)
-    g_q = np.clip(np.rint(gamma_f * (1 << 14)), -32768, 32767).astype(np.int64)
+    g_q = np.clip(np.rint(gamma_f * (1 << gamma_f_bits)), -32768, 32767).astype(np.int64)
+    assert np.abs(gamma_f).max() * (1 << gamma_f_bits) <= 32767, (
+        "gamma saturates at Q%d.%d - widen the integer part" % (16-gamma_f_bits, gamma_f_bits))
     eps_fixed = int(round(eps / (s_x * s_x)))
 
-    # requant config: int8 = sat((acc*scale_mult + 2^(sh-1)) >> sh) with
-    # acc = out_real * 2^OUT_FRAC, so scale_mult/2^sh = 1/(2^F * out_scale).
-    # Pick the largest shift that keeps scale_mult inside 16 signed bits.
     denom = (1 << OUT_FRAC) * out_scale
     shift_amt = 0
     for sh in range(31, -1, -1):
@@ -82,31 +122,28 @@ def main():
             break
     scale_mult = int(round((1 << shift_amt) / denom))
 
-    # GOLDEN: the verified numpy implementation, on the FLOAT inputs
     out_f = A.rmsnorm(x_f, gamma_f, eps)
     exp_q = np.clip(np.rint(out_f / out_scale), -128, QMAX8).astype(np.int64)
 
     def w(name, vals, width):
         mask = (1 << width) - 1
         with open(os.path.join(HERE, name), "w") as f:
-            f.write("\n".join(f"{int(v) & mask:0{width // 4}x}" for v in vals) + "\n")
+            f.write(chr(10).join("%0*x" % (width // 4, int(v) & mask)
+                                 for v in vals) + chr(10))
 
-    w("rmsnorm_x.memh", x_q, 16)
-    w("rmsnorm_gamma.memh", g_q, 16)
-    w("rmsnorm_exp.memh", exp_q, 8)
-    # hex so the TB can $readmemh it like every other generated vector
-    with open(os.path.join(HERE, "rmsnorm_params.memh"), "w") as f:
-        vals = [eps_fixed, scale_mult, shift_amt]
-        f.write(chr(10).join("%012x" % v for v in vals) + chr(10))
+    w("rmsnorm_x_%s.memh" % site, x_q, 16)
+    w("rmsnorm_gamma_%s.memh" % site, g_q, 16)
+    w("rmsnorm_exp_%s.memh" % site, exp_q, 8)
+    w("rmsnorm_params_%s.memh" % site, [eps_fixed, scale_mult, shift_amt, gamma_f_bits], 48)
 
-    print(f"x        INT16   absmax {np.abs(x_q).max()}  (s_x = {s_x:.6e})")
-    print(f"gamma    Q2.14   min {g_q.min()} max {g_q.max()}")
-    print(f"eps_fixed        {eps_fixed}")
-    print(f"out_scale        {out_scale:.8e}  (from calibrated absmax {out_absmax:.5f})")
-    print(f"requant          scale_mult {scale_mult}, shift_amt {shift_amt}")
-    print(f"expected INT8    min {exp_q.min()} max {exp_q.max()}, "
-          f"{int((np.abs(exp_q) == QMAX8).sum())} saturated")
-    print(f"wrote 4 files into {HERE}")
+    print("site             %s (%s), N = %d" % (site, label, N))
+    print("x        INT16   absmax %d  (s_x = %.6e)" % (np.abs(x_q).max(), s_x))
+    print("gamma    Q%d.%d  min %d max %d" % (16-gamma_f_bits, gamma_f_bits, g_q.min(), g_q.max()))
+    print("eps_fixed        %d" % eps_fixed)
+    print("out_scale        %.8e  (from calibrated absmax %.5f)" % (out_scale, out_absmax))
+    print("requant          scale_mult %d, shift_amt %d" % (scale_mult, shift_amt))
+    print("expected INT8    min %d max %d, %d saturated"
+          % (exp_q.min(), exp_q.max(), int((np.abs(exp_q) == QMAX8).sum())))
 
 
 if __name__ == "__main__":
