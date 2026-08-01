@@ -109,6 +109,9 @@ run_tb tb_axi_stream_to_buf_adapter rtl/tile_buffer.sv \
 # --- RMSNorm (first non-matmul unit) ---
 run_tb tb_rmsnorm        rtl/requant.sv rtl/rmsnorm.sv tb/tb_rmsnorm.sv
 
+# --- SwiGLU gate (SiLU + elementwise multiply + requant) ---
+run_tb tb_swiglu_gate    rtl/requant.sv rtl/swiglu_gate.sv tb/tb_swiglu_gate.sv
+
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
