@@ -84,7 +84,22 @@ module rope #(
     output logic                   cs_valid,
     output logic [$clog2(NF)-1:0]  cs_idx,
     output logic signed [SIN_W-1:0] cos_out,
-    output logic signed [SIN_W-1:0] sin_out
+    output logic signed [SIN_W-1:0] sin_out,
+
+    // ---- rotation ----
+    // Applies the CURRENT position's cos/sin to one head's vector.
+    // x is split as the model splits it: x1 = x[0:NF], x2 = x[NF:2*NF],
+    // the rotate-half convention already confirmed against real HF
+    // source in the software work.
+    input  logic                   rot_start,
+    output logic                   x_rd_en,
+    output logic [$clog2(NF)-1:0]  x_rd_addr,
+    input  logic signed [7:0]      x1_rd_data,   // x[j]
+    input  logic signed [7:0]      x2_rd_data,   // x[j+NF]
+    output logic                   rot_valid,
+    output logic [$clog2(NF)-1:0]  rot_idx,
+    output logic signed [7:0]      rot_x1,
+    output logic signed [7:0]      rot_x2
 );
 
     localparam int FW    = $clog2(NF);
@@ -124,7 +139,7 @@ module rope #(
     //----------------------------------------------------------------
     // FSM: one frequency per cycle, NF cycles per position.
     //----------------------------------------------------------------
-    typedef enum logic [1:0] { S_IDLE, S_STEP, S_TAIL } state_t;
+    typedef enum logic [2:0] { S_IDLE, S_STEP, S_TAIL, S_ROT, S_RTAIL } state_t;
     state_t state;
 
     logic [FW-1:0]      fi;
@@ -139,7 +154,10 @@ module rope #(
             pos_q   <= '0;
         end else begin
             case (state)
-                S_IDLE: if (start || seek) begin
+                S_IDLE: if (rot_start) begin
+                    state <= S_ROT;
+                    fi    <= '0;
+                end else if (start || seek) begin
                     state   <= S_STEP;
                     fi      <= '0;
                     is_seek <= seek;
@@ -148,6 +166,9 @@ module rope #(
                 S_STEP: if (fi == LAST_F) state <= S_TAIL;
                         else              fi    <= fi + 1'b1;
                 S_TAIL: state <= S_IDLE;      // let the last lookup land
+                S_ROT:  if (fi == LAST_F) state <= S_RTAIL;
+                        else              fi    <= fi + 1'b1;
+                S_RTAIL: state <= S_IDLE;     // drain the rotate pipe
                 default: state <= S_IDLE;
             endcase
         end
@@ -220,5 +241,84 @@ module rope #(
         cos_out <= ca + SIN_W'(cint >>> 8);
         cs_idx  <= idx_q;
     end
+
+    //----------------------------------------------------------------
+    // Keep this position's cos/sin so the rotation can replay them
+    // across all 24 heads without regenerating the phase each time.
+    //----------------------------------------------------------------
+    logic signed [SIN_W-1:0] cos_mem [NF];
+    logic signed [SIN_W-1:0] sin_mem [NF];
+
+    always_ff @(posedge clk) begin
+        if (cs_valid) begin
+            cos_mem[cs_idx] <= cos_out;
+            sin_mem[cs_idx] <= sin_out;
+        end
+    end
+
+    //----------------------------------------------------------------
+    // Rotation datapath. One (x1, x2) pair per cycle, NF cycles/head.
+    //
+    //   rot_x1 = x1*cos - x2*sin
+    //   rot_x2 = x2*cos + x1*sin
+    //
+    // NO REQUANT TAP HERE, and that is deliberate rather than an
+    // omission: a rotation preserves magnitude, so the output carries
+    // the SAME scale as the input. Every other unit in this design
+    // needs requant because it changes scale; this one does not. All
+    // that is required is the Q1.15 shift with round-half-up, matching
+    // the convention requant itself uses, and a saturate.
+    //
+    // Saturation is real, not theoretical: a single component of a
+    // rotated vector can exceed the original component maximum by up
+    // to sqrt(2) even though the norm is unchanged, so INT8 in does
+    // not guarantee INT8 out. The TB measures how often that actually
+    // bites on real data rather than assuming it is rare.
+    //----------------------------------------------------------------
+    logic signed [SIN_W-1:0] c_r, s_r;
+    logic                    rv1, rv2;
+    logic [FW-1:0]           ri1, ri2;
+    logic signed [24:0]      r1, r2;
+    logic signed [25:0]      r1_rnd, r2_rnd;
+
+    assign x_rd_en   = (state == S_ROT);
+    assign x_rd_addr = fi;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rv1 <= 1'b0;
+            rv2 <= 1'b0;
+        end else begin
+            rv1 <= (state == S_ROT);
+            rv2 <= rv1;
+        end
+    end
+
+    // cos/sin are REGISTERED here so they land in the same cycle as the
+    // external buffer's 1-cycle-latency read data. Reading them
+    // combinationally would present cos[j] against x[j-1].
+    always_ff @(posedge clk) begin
+        c_r <= cos_mem[fi];
+        s_r <= sin_mem[fi];
+        ri1 <= fi;
+        ri2 <= ri1;
+        r1  <= x1_rd_data * c_r - x2_rd_data * s_r;
+        r2  <= x2_rd_data * c_r + x1_rd_data * s_r;
+    end
+
+    assign r1_rnd = 26'(r1) + 26'sd16384;      // round half up at Q1.15
+    assign r2_rnd = 26'(r2) + 26'sd16384;
+
+    always_comb begin
+        if      ((r1_rnd >>> 15) >  26'sd127)  rot_x1 = 8'sd127;
+        else if ((r1_rnd >>> 15) < -26'sd128)  rot_x1 = -8'sd128;
+        else                                   rot_x1 = 8'((r1_rnd >>> 15));
+        if      ((r2_rnd >>> 15) >  26'sd127)  rot_x2 = 8'sd127;
+        else if ((r2_rnd >>> 15) < -26'sd128)  rot_x2 = -8'sd128;
+        else                                   rot_x2 = 8'((r2_rnd >>> 15));
+    end
+
+    assign rot_valid = rv2;
+    assign rot_idx   = ri2;
 
 endmodule

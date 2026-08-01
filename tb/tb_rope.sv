@@ -44,12 +44,19 @@ module tb_rope;
     logic [PHASE_W-1:0]     seek_pos;
     logic [5:0]             cs_idx;
     logic signed [SIN_W-1:0] cos_out, sin_out;
+    logic                    rot_start, rot_valid, x_rd_en;
+    logic [5:0]              x_rd_addr, rot_idx;
+    logic signed [7:0]       x1_rd_data, x2_rd_data, rot_x1, rot_x2;
 
     rope #(.NF(NF), .PHASE_W(PHASE_W), .SIN_N(4096), .SIN_W(SIN_W)) dut (
         .clk (clk), .rst_n (rst_n),
         .start (start), .seek (seek), .seek_pos (seek_pos), .busy (busy),
         .cs_valid (cs_valid), .cs_idx (cs_idx),
-        .cos_out (cos_out), .sin_out (sin_out)
+        .cos_out (cos_out), .sin_out (sin_out),
+        .rot_start (rot_start), .x_rd_en (x_rd_en), .x_rd_addr (x_rd_addr),
+        .x1_rd_data (x1_rd_data), .x2_rd_data (x2_rd_data),
+        .rot_valid (rot_valid), .rot_idx (rot_idx),
+        .rot_x1 (rot_x1), .rot_x2 (rot_x2)
     );
 
     // capture one position's worth of cos/sin
@@ -63,6 +70,47 @@ module tb_rope;
             got_n <= got_n + 1;
         end
     end
+
+    // head-vector halves, same 1-cycle read latency as tile_buffer
+    logic signed [7:0] xm1 [NF];
+    logic signed [7:0] xm2 [NF];
+    logic [7:0]        em1 [NF];
+    logic [7:0]        em2 [NF];
+    logic [31:0]       posmem [1];
+    always @(posedge clk) begin
+        if (x_rd_en) begin
+            x1_rd_data <= xm1[x_rd_addr];
+            x2_rd_data <= xm2[x_rd_addr];
+        end
+    end
+
+    int r1_got [NF];
+    int r2_got [NF];
+    int rot_n;
+    always @(posedge clk) begin
+        if (rot_valid) begin
+            r1_got[rot_idx] <= int'(rot_x1);
+            r2_got[rot_idx] <= int'(rot_x2);
+            rot_n <= rot_n + 1;
+        end
+    end
+
+    task automatic run_rotate();
+        int g;
+        while (busy) @(negedge clk);
+        rot_n = 0;
+        @(negedge clk) rot_start = 1'b1;
+        @(negedge clk) rot_start = 1'b0;
+        g = 0;
+        while (rot_n < NF) begin
+            @(negedge clk);
+            g = g + 1;
+            if (g > 4*NF) begin
+                errors++; $error("[rotate] only %0d of %0d pairs", rot_n, NF);
+                return;
+            end
+        end
+    endtask
 
     task automatic run_seek(input int unsigned p);
         int g;
@@ -133,6 +181,7 @@ module tb_rope;
 
     initial begin
         rst_n = 0; start = 0; seek = 0; seek_pos = '0; got_n = 0;
+        rot_start = 0; rot_n = 0;
         for (i = 0; i < NF; i++) begin got_c[i]=0.0; got_s[i]=0.0; end
         repeat (3) @(negedge clk);
         rst_n = 1;
@@ -191,6 +240,122 @@ module tb_rope;
         if (w_amp > 3.0e-4) begin
             errors++;
             $error("[P3] amplitude error %e exceeds 3e-4", w_amp);
+        end
+
+        //--- R1: rotation vs the exact-math golden (step 3/5) --------
+        // Real layer-0 head vector, post q_proj and q_norm, INT8 at the
+        // calibration scale - exactly where RoPE sits in the pipeline.
+        begin
+            int exact, worst, d, j, pk;
+            real nin, nout, nd, w_norm;
+            $readmemh("tb/rope_x1_q.memh",   xm1);
+            $readmemh("tb/rope_x2_q.memh",   xm2);
+            $readmemh("tb/rope_exp1_q.memh", em1);
+            $readmemh("tb/rope_exp2_q.memh", em2);
+            $readmemh("tb/rope_pos.memh",  posmem);
+
+            run_seek(posmem[0]);
+            run_rotate();
+
+            exact = 0; worst = 0;
+            for (j = 0; j < NF; j++) begin
+                d = r1_got[j] - $signed(em1[j]); if (d < 0) d = -d;
+                if (d == 0) exact = exact + 1;
+                if (d > worst) worst = d;
+                if (d > 1) begin
+                    errors++;
+                    $error("[R1] x1[%0d] got %0d golden %0d", j, r1_got[j], $signed(em1[j]));
+                end
+                d = r2_got[j] - $signed(em2[j]); if (d < 0) d = -d;
+                if (d == 0) exact = exact + 1;
+                if (d > worst) worst = d;
+                if (d > 1) begin
+                    errors++;
+                    $error("[R2] x2[%0d] got %0d golden %0d", j, r2_got[j], $signed(em2[j]));
+                end
+            end
+            if (worst <= 1)
+                $display("PASS [R1] rotation vs golden at position %0d: %0d/%0d exact, worst |diff| = %0d LSB",
+                         posmem[0], exact, 2*NF, worst);
+
+            //--- R2: NORM PRESERVATION across MANY positions ---------
+            // Necessary but NOT sufficient - see rope.sv: a phase error
+            // leaves the norm untouched, so R1 is what catches those.
+            // Swept over four decades because the drift depends on where
+            // each component lands relative to an INT8 rounding boundary,
+            // and one position would not show the spread.
+            nin = 0.0;
+            for (j = 0; j < NF; j++)
+                nin = nin + real'($signed(xm1[j]))*real'($signed(xm1[j]))
+                          + real'($signed(xm2[j]))*real'($signed(xm2[j]));
+            nin = $sqrt(nin);
+            w_norm = 0.0;
+            for (pk = 0; pk < 5; pk++) begin
+                case (pk)
+                    0: run_seek(1);
+                    1: run_seek(137);
+                    2: run_seek(1000);
+                    3: run_seek(9999);
+                    default: run_seek(40959);
+                endcase
+                run_rotate();
+                nout = 0.0;
+                for (j = 0; j < NF; j++)
+                    nout = nout + real'(r1_got[j])*real'(r1_got[j])
+                                + real'(r2_got[j])*real'(r2_got[j]);
+                nout = $sqrt(nout);
+                nd = (nout - nin) / nin;
+                if (nd < 0.0) nd = -nd;
+                if (nd > w_norm) w_norm = nd;
+            end
+            $display("PASS [R2] norm preserved across 5 positions: |in| %.4f, worst rel drift %e",
+                     nin, w_norm);
+            // 1.2e-2: measured worst over the sweep is 4.08e-3, which is
+            // 1.1 sigma of the drift INT8 OUTPUT ROUNDING alone produces on
+            // a 128-component vector (|v|=92, sum(d^2)=+10.7 systematic,
+            // 2*sum(v*d) sd = 53.2 -> 3 sigma = 1.00e-2). So the bound is
+            // set just above 3 sigma: tight enough to catch a real amplitude
+            // or saturation problem, loose enough not to fire on ordinary
+            // rounding statistics at a different position. Set AFTER
+            // sweeping - a single-position guess put it at 1.5e-3 and was
+            // wrong.
+            // INT8 OUTPUT ROUNDING, not the cos/sin table - each
+            // component rounds to nearest, and the norm inherits that.
+            if (w_norm > 1.2e-2) begin
+                errors++;
+                $error("[R2] worst norm drift %e exceeds 1.2e-2", w_norm);
+            end
+        end
+
+        //--- R3: the same rotation on a real K vector ---------------
+        // K differs from Q only in the norm that precedes it and the
+        // head count; the rotation itself is identical, so this is a
+        // data-diversity check on the same datapath rather than new
+        // logic. Its input distribution is quite different (scale 3.69
+        // vs 0.29), which is the point.
+        begin
+            int exact, worst, d, j;
+            $readmemh("tb/rope_x1_k.memh",   xm1);
+            $readmemh("tb/rope_x2_k.memh",   xm2);
+            $readmemh("tb/rope_exp1_k.memh", em1);
+            $readmemh("tb/rope_exp2_k.memh", em2);
+            run_seek(posmem[0]);
+            run_rotate();
+            exact = 0; worst = 0;
+            for (j = 0; j < NF; j++) begin
+                d = r1_got[j] - $signed(em1[j]); if (d < 0) d = -d;
+                if (d == 0) exact = exact + 1;
+                if (d > worst) worst = d;
+                d = r2_got[j] - $signed(em2[j]); if (d < 0) d = -d;
+                if (d == 0) exact = exact + 1;
+                if (d > worst) worst = d;
+            end
+            if (worst > 1) begin
+                errors++;
+                $error("[R3] K rotation worst |diff| = %0d LSB", worst);
+            end else
+                $display("PASS [R3] K vector rotation: %0d/%0d exact, worst |diff| = %0d LSB",
+                         exact, 2*NF, worst);
         end
 
         repeat (2) @(negedge clk);
