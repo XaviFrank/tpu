@@ -73,7 +73,13 @@ module rmsnorm #(
     parameter int GAMMA_F  = 14,   // site 2's gamma reaches -1.492, so
                                    // the format must be signed, not unsigned
     parameter int OUT_FRAC = 24,   // fractional bits handed to requant
-    parameter int RQ_PIPE  = 2
+    parameter int RQ_PIPE  = 2,
+    // $readmemh data-file path. Default is repo-root-relative, which is
+    // what Icarus needs (it resolves against the CWD regress.sh runs
+    // from; -I does NOT apply to $readmemh). Vivado's synth run has a
+    // different CWD, so override with an absolute path there:
+    //   -generic RSQRT_LUT_PATH=C:/dev/tpu/rtl/rsqrt_lut.memh
+    parameter RSQRT_LUT_PATH = "rtl/rsqrt_lut.memh"
 )(
     input  logic clk,
     input  logic rst_n,
@@ -287,7 +293,7 @@ module rmsnorm #(
     end
 
     (* rom_style = "block" *) logic [17:0] seed_lut [256];
-    initial $readmemh("rtl/rsqrt_lut.memh", seed_lut);
+    initial $readmemh(RSQRT_LUT_PATH, seed_lut);
 
     logic [17:0] y0;
     logic [17:0] u18;

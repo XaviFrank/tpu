@@ -73,7 +73,10 @@
 module swiglu_gate #(
     parameter int ACC_W   = 32,
     parameter int SILU_F  = 12,     // Q4.12
-    parameter int RQ_PIPE = 2
+    parameter int RQ_PIPE = 2,
+    // See rmsnorm.sv for why this is a parameter. Vivado override:
+    //   -generic SILU_LUT_PATH=C:/dev/tpu/rtl/silu_lut.memh
+    parameter SILU_LUT_PATH = "rtl/silu_lut.memh"
 )(
     input  logic clk,
     input  logic rst_n,
@@ -147,7 +150,7 @@ module swiglu_gate #(
     // 257 entries rather than 256.
     //----------------------------------------------------------------
     (* rom_style = "block" *) logic signed [15:0] silu_lut [LUT_N];
-    initial $readmemh("rtl/silu_lut.memh", silu_lut);
+    initial $readmemh(SILU_LUT_PATH, silu_lut);
 
     logic [7:0]        idx;
     logic [8:0]        idx_p1;

@@ -68,7 +68,14 @@ module rope #(
     parameter int NF      = 64,     // frequency pairs = head_dim/2
     parameter int PHASE_W = 32,
     parameter int SIN_N   = 4096,
-    parameter int SIN_W   = 16      // Q1.15
+    parameter int SIN_W   = 16,     // Q1.15
+    // See rmsnorm.sv for why these are parameters. Two files, but
+    // ROPE_SIN_PATH feeds four arrays (sin_a/sin_b/cos_a/cos_b).
+    // Vivado overrides:
+    //   -generic ROPE_FREQ_PATH=C:/dev/tpu/rtl/rope_freq.memh
+    //   -generic ROPE_SIN_PATH=C:/dev/tpu/rtl/rope_sin.memh
+    parameter ROPE_FREQ_PATH = "rtl/rope_freq.memh",
+    parameter ROPE_SIN_PATH  = "rtl/rope_sin.memh"
 )(
     input  logic clk,
     input  logic rst_n,
@@ -118,7 +125,7 @@ module rope #(
     // Tables. freq is a ROM; phase is read-modify-write state.
     //----------------------------------------------------------------
     (* rom_style = "block" *) logic [PHASE_W-1:0] freq_rom [NF];
-    initial $readmemh("rtl/rope_freq.memh", freq_rom);
+    initial $readmemh(ROPE_FREQ_PATH, freq_rom);
 
     logic [PHASE_W-1:0] phase_mem [NF];
 
@@ -130,10 +137,10 @@ module rope #(
     (* rom_style = "block" *) logic signed [SIN_W-1:0] cos_a [SIN_N];
     (* rom_style = "block" *) logic signed [SIN_W-1:0] cos_b [SIN_N];
     initial begin
-        $readmemh("rtl/rope_sin.memh", sin_a);
-        $readmemh("rtl/rope_sin.memh", sin_b);
-        $readmemh("rtl/rope_sin.memh", cos_a);
-        $readmemh("rtl/rope_sin.memh", cos_b);
+        $readmemh(ROPE_SIN_PATH, sin_a);
+        $readmemh(ROPE_SIN_PATH, sin_b);
+        $readmemh(ROPE_SIN_PATH, cos_a);
+        $readmemh(ROPE_SIN_PATH, cos_b);
     end
 
     //----------------------------------------------------------------
