@@ -153,10 +153,13 @@ def main():
                     for li in layers:
                         k = get_kv(cache, li, "k")[0].numpy().astype(np.float64)
                         v = get_kv(cache, li, "v")[0].numpy().astype(np.float64)
+                        # K and V take separate treatments: the whole
+                        # point of the asymmetric format is that they
+                        # are consumed differently.
+                        fk, fv = fn if fn else (qdq, qdq)
                         for hd in range(k.shape[0]):
-                            f = fn or qdq
-                            k[hd] = f(k[hd], h, d, bookK, 2, 1)
-                            v[hd] = f(v[hd], h, d, bookV, 3, 0)
+                            k[hd] = fk(k[hd], h, d, bookK, 2, 1)
+                            v[hd] = fv(v[hd], h, d, bookV, 3, 0)
                         set_kv(cache, li, "k", torch.tensor(
                             k, dtype=torch.float32).unsqueeze(0))
                         set_kv(cache, li, "v", torch.tensor(
@@ -173,10 +176,11 @@ def main():
     print("running exact reference ...")
     pe, te, ne = run(None)
 
-    trials = [("CONTROL identity", list(range(nl)), qdq_identity),
-              ("CONTROL int8+rot", list(range(nl)), qdq_int8),
-              ("layer 0 only", [0], None),
-              ("ALL %d layers" % nl, list(range(nl)), None)]
+    A = list(range(nl))
+    trials = [("CONTROL identity", A, (qdq_identity, qdq_identity)),
+              ("K 2b+QJL / V 3b", A, None),
+              ("K INT8   / V 3b", A, (qdq_int8, qdq)),
+              ("K INT8   / V INT8", A, (qdq_int8, qdq_int8))]
     for label, layers, fn in trials:
         print("running %s ..." % label)
         pq, tq, nq = run(layers, fn)
