@@ -1,0 +1,173 @@
+# KV cache quantized write path — design notes
+
+Companion to `ws_design_notes.md`. Covers the write side only: rotate,
+quantize, append. Attention compute (Q·Kᵀ, softmax, ·V) is a separate,
+later spec and is **not** described here.
+
+---
+
+## 1. Which rotation does TurboQuant actually specify?
+
+**Finding: a dense random orthogonal matrix. Not Hadamard.**
+
+The paper is *TurboQuant: Online Vector Quantization with Near-optimal
+Distortion Rate*, arXiv 2504.19874 — Zandieh, Daliri, Hadian, Mirrokni
+(Google Research / NYU / Google DeepMind). Its methodology states:
+
+> "We start by randomizing this vector by multiplying it with a random
+> rotation matrix **Π ∈ ℝ^(d×d)**. We can generate Π by applying **QR
+> decomposition on a random matrix with i.i.d Normal entries**."
+
+The guarantee is proven *for that construction*. Everything downstream
+rests on
+
+> "The resulting rotated vector, **Π·x**, is uniformly distributed on
+> the unit sphere **S^(d-1)**."
+
+That uniformity is what induces the Beta coordinate distribution the
+fixed Lloyd–Max scalar codebook is designed against. It is exactly what
+a Haar-random orthogonal matrix gives and what a randomized Hadamard
+transform gives only approximately.
+
+**The words "Hadamard", "Walsh", "O(d log d)" and "FFT" do not appear
+anywhere in the paper**, including implementation, experiments and
+appendices. It nowhere acknowledges dense rotation as a cost, and
+nowhere offers a faster alternative.
+
+### Where the "TurboQuant uses Hadamard" claim comes from
+
+There *is* a Hadamard variant — **TurboQuant-H** — but it is **third
+party** (Karen Mosoyan, Henry Ndubuaku; Cactus Compute), not the paper's
+authors. It describes the original as "Random orthogonal matrix via QR
+of Gaussian, O(d²)" and substitutes "Normalized Hadamard matrix,
+O(N log N), symmetric = self-inverse." Its stated justification
+explicitly excludes our use case:
+
+> "For **offline weight quantization** we don't need the data-oblivious
+> guarantees of a random rotation... The Hadamard rotation still
+> concentrates coordinates, which is all we need."
+
+KV cache quantization is the *online, data-oblivious* case — the one
+that sentence carves out. Several secondary write-ups conflate the two
+and describe the original as using a fast Walsh–Hadamard transform.
+That is wrong, and it is the reason this investigation was gated ahead
+of any RTL.
+
+---
+
+## 2. What it costs here
+
+Real dims from `software/qwen/config.json`: `head_dim` 128, 28 layers,
+8 KV heads → **448 rotations per token**, d = 128.
+
+| | Dense Π (paper) | Randomized Hadamard (HD) |
+|---|---|---|
+| ops / vector | 16,384 MAC | 896 add/sub, **0 mult** |
+| ops / token | 7.34 MMAC | 401K add/sub |
+| array time / token, 16×16 @215 MHz | ~29.7K cyc ≈ **138 µs** batched | negligible |
+| new DSPs | 0 *if time-shared with `ws_array`*, ~256 dedicated | **0** |
+| inverse | Πᵀ (transpose read) | self-inverse |
+
+Π is **fixed and data-oblivious**, so the rotation is a fixed-matrix
+matrix-vector product — precisely what the weight-stationary array
+already does. It can reuse `ws_array` + `ws_tiling_engine`
+(128×128 = 64 tiles of 16×16) at zero new DSPs, spending array time
+instead. Batching the 16 K/V vectors per layer amortizes weight reload
+to ~50% utilization (~267 µs/token, ~3% of an ~8 ms token); the Week-4
+double-buffered prefetch could hide most of that.
+
+So dense is *affordable* — it buys a scheduling and buffering problem,
+not a free lunch.
+
+**This inverts the acceptance check in the spec's §8.** Seeing DSPs is
+no longer evidence of a mistake. For a dense-mode build, seeing *zero*
+DSPs would mean the rotation never reached a multiplier.
+
+---
+
+## 3. Two things the paper never had to face, because it ran in float
+
+1. **Fixed point erodes the dense advantage.** Π's entries are
+   ~N(0, 1/128), sd ≈ 0.0884. Quantizing Π *itself* to INT8 perturbs
+   the very orthogonality the 16K MACs are being spent on. A normalized
+   Hadamard's ±1/√128 entries are **exact** in fixed point under a
+   single shared scale.
+2. **d = 128 is where the Hadamard approximation is weakest.**
+   Randomized-Hadamard concentration is asymptotic in d with log
+   factors, and so is the paper's exact-Beta assumption. At d = 128 the
+   gap between HD and Haar-random is likelier to be visible than at
+   d = 4096. This cuts both ways — it argues for measuring, not for
+   assuming either construction.
+
+### Prediction, recorded before the measurement
+
+Stated up front so the step-5 round-trip number can confirm or refute
+it rather than be rationalized after the fact:
+
+- **Hadamard path error should be dominated purely by 3-bit
+  quantization.** `H_unnorm` and the Rademacher `D` are exact integers,
+  and `H_unnormᵀ·H_unnorm = 128·I` **exactly**, so the forward and
+  inverse transforms are lossless in integer arithmetic. The only error
+  is the quantizer.
+- **Dense path error should be strictly larger**: 3-bit quantization
+  *plus* a residual non-orthogonality term, because `Π_int8ᵀ·Π_int8 ≠ I`
+  once Π is quantized to INT8.
+
+**So the prediction is that the cheap transform wins on this hardware,
+for a reason that does not exist on the GPU the paper was written for.**
+If the measurement contradicts this, the modelling above is wrong and
+the note gets corrected, not the number.
+
+---
+
+## 4. Decisions taken
+
+**Rotation — pluggable, both built, measured.** `ROT_MODE` selects
+dense-Π or randomized-Hadamard behind one interface. The literature
+question is settled; the question that actually governs the datapath is
+whether the cheap transform loses accuracy *on this data, in INT8, at
+d=128*, and that is measurable on hardware already in the repo. The two
+paths live in `generate` branches so a Hadamard-configured synth truly
+carries no multiplier and no 16 KB Π ROM.
+
+**Storage format — asymmetric between K and V.** The paper's
+inner-product quantizer stores three parts:
+
+> `Q_prod(x) = [Q_mse(x), Q_qjl(x − Q_mse⁻¹(Q_mse(x))), ‖x − Q_mse⁻¹(Q_mse(x))‖₂]`
+
+MSE-optimal quantizers are *biased for inner products* — that is the
+paper's own stated reason for the QJL stage. Attention scores are inner
+products. So:
+
+- **K** → 2-bit MSE + 1-bit QJL residual + residual norm (unbiased for
+  Q·Kᵀ).
+- **V** → pure 3-bit MSE. V is consumed as a probability-weighted sum,
+  where reconstruction error is what matters.
+
+This matters because "write side only" does not actually defer the
+question: the write path fixes the format the deferred read side must
+live with. A pure-MSE format would also make the step-4 round-trip TB
+*look* excellent — reconstruction error is the exact metric an MSE
+quantizer optimizes — while being the wrong format for attention. That
+is a vacuity trap of the same shape as the RMSNorm gamma and RoPE
+threshold findings.
+
+**Bit width.** The spec asks for 3 bits. The paper reports **3.5 bits**
+(quality-neutral) and **2.5 bits** (marginal degradation), both via
+mixed precision — e.g. 2.5 = 32 outlier channels @3b + 96 @2b. Uniform
+3-bit is a sound engineering choice but is *not* a number from the
+paper, and is recorded as a deviation.
+
+**Cache residency.** BRAM-resident at a modest test size for now.
+~2.35 GB at INT8 for the full 40,960-token context means DRAM residency
+is unavoidable at real context lengths regardless of compression;
+DRAM-backed addressing is real future work, deliberately not required
+to prove the quantize/append mechanism.
+
+---
+
+## 5. Sources
+
+- [TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate (arXiv 2504.19874)](https://arxiv.org/abs/2504.19874)
+- [ar5iv full text](https://ar5iv.labs.arxiv.org/html/2504.19874)
+- [TurboQuant-H — Cactus Compute (third-party Hadamard variant)](https://docs.cactuscompute.com/v1.14/blog/turboquant-h/)
