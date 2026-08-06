@@ -46,11 +46,11 @@ module tb_attn_scan;
     logic [47:0] exp_l [1];
 
     initial begin
-        $readmemh("tb/attn_yq.memh", yq);
+        $readmemh("tb/attn_yq0.memh", yq);
         $readmemh("tb/attn_kw.memh", kw);
         $readmemh("tb/attn_vw.memh", vw);
-        $readmemh("tb/attn_o.memh",  exp_o);
-        $readmemh("tb/attn_l.memh",  exp_l);
+        $readmemh("tb/attn_o0.memh",  exp_o);
+        $readmemh("tb/attn_l0.memh",  exp_l);
     end
 
     logic               q_wr, prep_start, prep_done;

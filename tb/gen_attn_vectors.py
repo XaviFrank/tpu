@@ -42,7 +42,8 @@ import attention_l0 as A                                                # noqa
 from gen_kv_rot_tables import N, hadamard                               # noqa
 from gen_kv_quant_vectors import codebook, quantize                     # noqa
 
-QHEAD, SSHIFT, SFRAC, GUARD, MAXN = 6, 0, 16, 16, 40
+QHEADS = (6, 7)          # both Q heads that share KV head 3
+SSHIFT, SFRAC, GUARD, MAXN = 0, 16, 16, 40
 
 
 def real_row():
@@ -82,8 +83,9 @@ def real_row():
             arr[t, :, :nf] = a1 * c - a2 * s
             arr[t, :, nf:] = a2 * c + a1 * s
 
-    kvh = QHEAD // (nq // nkv)
-    return T, hd, q[T-1, QHEAD], k[:, kvh], v[:, kvh]
+    kvh = QHEADS[0] // (nq // nkv)
+    assert all(qh // (nq // nkv) == kvh for qh in QHEADS)
+    return T, hd, [q[T-1, qh] for qh in QHEADS], k[:, kvh], v[:, kvh]
 
 
 def model(yq, entries, tab, levV):
@@ -118,7 +120,7 @@ def model(yq, entries, tab, levV):
 
 
 def main():
-    T, hd, qv, kv, vv = real_row()
+    T, hd, qvs, kv, vv = real_row()
     h_mat = hadamard(N)
     sign = np.array([int(x, 16) for x in
                      open(os.path.join(RTL, "kv_rot_sign.memh"))], dtype=np.int64)
@@ -128,23 +130,13 @@ def main():
 
     sk = float(np.abs(kv).max()) / 127.0
     sv = float(np.abs(vv).max()) / 127.0
-    sq = float(np.abs(qv).max()) / 127.0
     kq = np.clip(np.rint(kv / sk), -128, 127).astype(np.int64)
     vq = np.clip(np.rint(vv / sv), -128, 127).astype(np.int64)
-    qq = np.clip(np.rint(qv / sq), -128, 127).astype(np.int64)
 
-    # G folds both cache scales, 1/sqrt(hd) and log2(e). The N that
-    # (H D q).(H D k) = N (q.k) used to contribute is gone with the
-    # rotation - K is INT8 in the original domain now, so the query is
-    # NOT rotated either.
-    G = (sq * sk * math.log2(math.e) * (1 << SFRAC) * (1 << SSHIFT)
-         / math.sqrt(hd))
-    yq = np.rint(qq * G).astype(np.int64)
-    assert np.abs(yq).max() < (1 << 31), "yq overflows 32 bits: %d" % np.abs(yq).max()
-
+    # Cache lines are built ONCE and reused by every sharing Q head -
+    # which is the whole point of the GQA reuse, made literal here.
     entries, kwords, vwords = [], [], []
     for t in range(T):
-        # K line: 32 words of packed INT8, no rotation, no norm word
         acc = 0
         for val in kq[t]:
             acc = (acc << 8) | (int(val) & 0xFF)
@@ -154,35 +146,42 @@ def main():
         entries.append((list(map(int, kq[t])), list(map(int, qv_)), vnV))
         vwords += wv
 
-    o, l, m, resc = model(yq, entries, tab, levV)
-    assert resc > 0, "no rescale fired - the test would be vacuous"
-
     def w(name, vals, width):
         with open(os.path.join(HERE, name), "w") as f:
             f.write(chr(10).join("%0*x" % (width // 4, int(x) & ((1 << width) - 1))
                                  for x in vals) + chr(10))
 
-    w("attn_yq.memh", yq, 32)
     w("attn_kw.memh", kwords, 32)
     w("attn_vw.memh", vwords, 32)
-    w("attn_o.memh", o, 48)
-    w("attn_l.memh", [l], 48)
+    print("real row: %d positions, KV head %d shared by Q heads %s"
+          % (T, QHEADS[0] // 2, list(QHEADS)))
 
-    # float reference: real attention for this head over this row
-    ref = A.rmsnorm  # keep the import meaningful
-    sc = (qq @ kq.T) * sq * sk / math.sqrt(hd)
-    p = np.exp(sc - sc.max()); p /= p.sum()
-    ref_out = p @ (vq * sv)
-    got = (np.array(o, dtype=np.float64) / l) * (1 << 15)
-    got = (h_mat @ got) * d_vec / N * sv          # un-rotate, back to real units
-    rel = (np.linalg.norm(got - ref_out) / np.linalg.norm(ref_out))
+    for hi, qv in enumerate(qvs):
+        sq = float(np.abs(qv).max()) / 127.0
+        qq = np.clip(np.rint(qv / sq), -128, 127).astype(np.int64)
+        G = (sq * sk * math.log2(math.e) * (1 << SFRAC) * (1 << SSHIFT)
+             / math.sqrt(hd))
+        yq = np.rint(qq * G).astype(np.int64)
+        assert np.abs(yq).max() < (1 << 31), "yq overflows 32 bits"
 
-    print("real row: %d positions, Q head %d -> KV head %d" % (T, QHEAD, QHEAD // 2))
-    print("  rescale events   %d of %d positions  (max moved %d times)" % (resc, T, resc))
-    print("  final m %d   l %d" % (m, l))
-    print("  vs float attention: rel err %.4f  (%.2f dB)"
-          % (rel, -20 * math.log10(rel)))
-    print("  wrote attn_yq/kw/vw/o/l .memh")
+        # Each head is modelled INDEPENDENTLY - no shared state - so the
+        # testbench comparing the shared hardware against these goldens
+        # is exactly section 6's "matches independent computation".
+        o, l, m, resc = model(yq, entries, tab, levV)
+        assert resc > 0, "no rescale fired for head %d" % QHEADS[hi]
+
+        w("attn_yq%d.memh" % hi, yq, 32)
+        w("attn_o%d.memh" % hi, o, 48)
+        w("attn_l%d.memh" % hi, [l], 48)
+
+        sc = (qq @ kq.T) * sq * sk / math.sqrt(hd)
+        pr = np.exp(sc - sc.max()); pr /= pr.sum()
+        ref_out = pr @ (vq * sv)
+        got = (np.array(o, dtype=np.float64) / l) * (1 << 15)
+        got = (h_mat @ got) * d_vec / N * sv
+        rel = np.linalg.norm(got - ref_out) / np.linalg.norm(ref_out)
+        print("  Q head %d: %d rescale(s), m %d, vs float %.2f dB"
+              % (QHEADS[hi], resc, m, -20 * math.log10(rel)))
 
 
 if __name__ == "__main__":
