@@ -118,6 +118,56 @@ for a reason that does not exist on the GPU the paper was written for.**
 If the measurement contradicts this, the modelling above is wrong and
 the note gets corrected, not the number.
 
+### Refinement after step 2 — the predicted mechanism is real but negligible
+
+Measured, `tb/gen_kv_rot_tables.py`:
+
+| | max off-diagonal | rms off-diagonal |
+|---|---|---|
+| Π in float | 9.99e-16 | — |
+| **Π quantized to INT8** | **5.29e-03** | **1.23e-03** |
+| Randomized Hadamard | 0 (exact) | 0 (exact) |
+
+So the non-orthogonality predicted above is real and measurable. **But
+it is ~150× smaller than the error it would have to compete with**: an
+optimal 8-level scalar quantizer on a Gaussian source runs ~14.6 dB
+SNR, i.e. relative rms error ≈ 0.19, against Π's 1.2e-3. The
+orthogonality penalty will be *swamped* by 3-bit quantization noise and
+is not going to decide anything.
+
+**The prediction was directionally right and practically irrelevant.**
+The honest correction: the mechanism that actually separates the two
+modes is not orthogonality, it is *how well each flattens outliers*,
+which step 2 measured directly (`tb_kv_rotate`, real layer-0 vectors,
+hardware output):
+
+| peak/rms | input | Hadamard out | dense Π out |
+|---|---|---|---|
+| K (post-k_norm, post-RoPE) | 10.911 | **1.658** | 3.137 |
+| V (raw v_proj, not normed) | 6.305 | **2.546** | 2.815 |
+
+Both flatten hard; Hadamard flattens *further* on both vectors.
+
+### But flatter is not automatically better — a trap for step 3
+
+The dense numbers (3.137, 2.815) are not a defect. A Haar rotation
+makes coordinates ~Gaussian, and peak/rms ≈ 3 is simply what 128
+Gaussian samples look like — it is the **Beta density the paper's
+Lloyd–Max codebook is fitted to**. The Hadamard output is flatter than
+Gaussian (1.658) because `H` spreads energy deterministically: a spike
+input becomes all ±1, peak/rms exactly 1.
+
+So the two modes produce **different output distributions**, and a
+single codebook cannot be optimal for both. Scoring the Hadamard path
+with the paper's Beta-fitted codebook would handicap it for a reason
+that has nothing to do with the rotation, and would make the step-5
+comparison invalid.
+
+**Step 3 must therefore fit one codebook per `ROT_MODE`**, each to its
+own mode's empirical output distribution, and say which is which.
+Recorded here because it is exactly the kind of mismatch that produces
+a confident, wrong conclusion.
+
 ---
 
 ## 4. Decisions taken

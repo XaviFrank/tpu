@@ -115,6 +115,9 @@ run_tb tb_swiglu_gate    rtl/requant.sv rtl/swiglu_gate.sv tb/tb_swiglu_gate.sv
 # --- RoPE phase generation (accumulate + seek + cos/sin) ---
 run_tb tb_rope           rtl/rope.sv tb/tb_rope.sv
 
+# --- KV cache write path: rotation stage, both constructions ---
+run_tb tb_kv_rotate      rtl/kv_rotate.sv tb/tb_kv_rotate.sv
+
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
