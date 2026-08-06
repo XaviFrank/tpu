@@ -64,7 +64,19 @@ def w(name, vals, width):
                              for v in vals) + chr(10))
 
 
-def main():
+def load_real_kv():
+    """Real layer-0 K (post-k_norm, post-RoPE) and V (raw), INT8.
+
+    Shared with gen_kv_codebooks.py so the codebooks are fitted on
+    exactly the vectors the testbench then quantizes - a codebook fitted
+    on a different distribution than the one measured would make the
+    step-5 numbers meaningless.
+    """
+    cfg, _, _, q = _build()
+    return cfg, q
+
+
+def _build():
     cfg = json.load(open(os.path.join(CACHE, "config.json")))
     eps = cfg["rms_norm_eps"]
     hd, base = cfg["head_dim"], cfg["rope_theta"]
@@ -101,22 +113,35 @@ def main():
     k1, k2 = allk[:, :nf], allk[:, nf:]
     allk = np.concatenate([k1 * c - k2 * s_, k2 * c + k1 * s_], axis=1)
 
-    h_mat = hadamard(N)
+    scales, quant = {}, {}
+    for name, arr in (("k", allk), ("v", allv)):
+        scales[name] = float(np.abs(arr).max()) / 127.0
+        quant[name] = np.clip(np.rint(arr / scales[name]),
+                              -128, 127).astype(np.int64)
+    return cfg, nkv, scales, quant
+
+
+def rot_tables():
+    """The tables as the RTL will actually read them, re-decoded from
+    the emitted memh rather than recomputed - so a table the hardware
+    cannot load is a table the golden does not silently substitute."""
     sign = np.array([int(l, 16) for l in
                      open(os.path.join(RTL, "kv_rot_sign.memh"))], dtype=np.int64)
     d_vec = np.where(sign == 1, -1, 1)
     pi_q = np.array([int(l, 16) for l in
                      open(os.path.join(RTL, "kv_rot_pi.memh"))], dtype=np.int64)
     pi_q = np.where(pi_q > 127, pi_q - 256, pi_q).reshape(N, N)
-
-    for name, arr in (("k", allk), ("v", allv)):
-        emit(name, arr, h_mat, d_vec, pi_q, nkv)
+    return hadamard(N), d_vec, pi_q
 
 
-def emit(name, arr, h_mat, d_vec, pi_q, nkv):
-    scale = float(np.abs(arr).max()) / 127.0
-    q = np.clip(np.rint(arr / scale), -128, 127).astype(np.int64)
+def main():
+    cfg, nkv, scales, quant = _build()
+    h_mat, d_vec, pi_q = rot_tables()
+    for name in ("k", "v"):
+        emit(name, quant[name], scales[name], h_mat, d_vec, pi_q, nkv)
 
+
+def emit(name, q, scale, h_mat, d_vec, pi_q, nkv):
     # Where HEAD sits among all heads, so the choice is auditable
     # rather than convenient. Heads are interleaved every nkv rows.
     per_head = [crest(q[hh::nkv].reshape(-1)) for hh in range(nkv)]
