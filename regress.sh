@@ -121,8 +121,8 @@ run_tb tb_kv_quantize    rtl/kv_rotate.sv rtl/kv_quantize.sv tb/tb_kv_quantize.s
 run_tb tb_kv_cache_store rtl/kv_rotate.sv rtl/kv_quantize.sv \
                          rtl/kv_cache_store.sv tb/tb_kv_cache_store.sv
 run_tb tb_kv_dequant     rtl/kv_rotate.sv rtl/kv_quantize.sv \
-                         rtl/kv_cache_store.sv rtl/kv_dequant.sv \
-                         tb/tb_kv_dequant.sv
+                         rtl/kv_cache_store.sv rtl/kv_unpack.sv \
+                         rtl/kv_dequant.sv tb/tb_kv_dequant.sv
 
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \

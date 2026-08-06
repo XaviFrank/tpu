@@ -94,7 +94,7 @@ module kv_dequant #(
     initial $readmemh(CB_PATH, cb_rom);
 
     typedef enum logic [2:0] {
-        D_IDLE, D_LOADW, D_LEV, D_REC, D_ROT, D_OUT
+        D_IDLE, D_LEV, D_REC, D_ROT, D_OUT
     } state_t;
     state_t state;
 
@@ -102,26 +102,33 @@ module kv_dequant #(
     logic [QB-1:0]      qbits;
     logic [N-1:0]       sbits;
     logic [ROOT_W-1:0]  vnorm, rnorm;
+    logic               entry_valid, u_busy;
     logic [31:0]        lev_s [NLEV];
     logic [31:0]        amp;
     logic [ACC_W-1:0]   mem [N];
     logic               calc_done;
     logic [ACC_W-1:0]   out_data;
 
-    assign busy = (state != D_IDLE);
+    assign busy = (state != D_IDLE) || u_busy;
 
     //----------------------------------------------------------------
-    // Word intake. Element 0 sits in the top bits of word 0, matching
-    // the packing kv_quantize produced.
+    // Word intake is kv_unpack's job, shared with the attention scan.
+    // This module adds the level rescale and the inverse rotation,
+    // which are the parts the scan deliberately does NOT want - see
+    // kv_unpack.sv's header for why that boundary is where it is.
     //----------------------------------------------------------------
-    always_ff @(posedge clk) begin
-        if (w_valid) begin
-            if (cnt < NWQ)            qbits <= {qbits[QB-33:0], w_data};
-            else if (cnt == NWQ)      vnorm <= w_data[ROOT_W-1:0];
-            else if (cnt <= NWQ + 4)  sbits <= {sbits[N-33:0], w_data};
-            else                      rnorm <= w_data[ROOT_W-1:0];
-        end
-    end
+    kv_unpack #(.N(N), .QBITS(QBITS), .QJL_EN(QJL_EN)) u_unpack (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .w_valid     (w_valid),
+        .w_data      (w_data),
+        .busy        (u_busy),
+        .codes       (qbits),
+        .signs       (sbits),
+        .vnorm       (vnorm),
+        .rnorm       (rnorm),
+        .entry_valid (entry_valid)
+    );
 
     //----------------------------------------------------------------
     // Rescale the codebook levels by ||y||, exactly as kv_quantize did.
@@ -203,17 +210,9 @@ module kv_dequant #(
         end else begin
             done <= 1'b0;
             case (state)
-                D_IDLE: if (w_valid) begin
-                    state <= D_LOADW;
-                    cnt   <= 1;
-                end
-                D_LOADW: if (w_valid) begin
-                    if (cnt == NWORDS - 1) begin
-                        state <= D_LEV;
-                        cnt   <= '0;
-                    end else begin
-                        cnt <= cnt + 1'b1;
-                    end
+                D_IDLE: if (entry_valid) begin
+                    state <= D_LEV;
+                    cnt   <= '0;
                 end
                 D_LEV: if (cnt == NLEV - 1) begin
                     state <= D_REC;
