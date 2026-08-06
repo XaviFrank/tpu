@@ -153,6 +153,11 @@ def main():
 
     w("attn_kw.memh", kwords, 32)
     w("attn_vw.memh", vwords, 32)
+    # Raw INT8 vectors too, so the integration TB can drive the REAL
+    # write path (kv_pack_int8 for K, kv_rotate+kv_quantize for V)
+    # rather than injecting pre-packed words.
+    w("attn_xk.memh", kq.reshape(-1), 8)
+    w("attn_xv.memh", vq.reshape(-1), 8)
     print("real row: %d positions, KV head %d shared by Q heads %s"
           % (T, QHEADS[0] // 2, list(QHEADS)))
 
