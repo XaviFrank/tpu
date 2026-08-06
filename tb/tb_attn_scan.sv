@@ -2,7 +2,7 @@
 //====================================================================
 // tb_attn_scan - streaming attention over a REAL causal row.
 //
-//   10 positions from the first calibration sequence, each RoPE'd at
+//   102 positions from the calibration text, each RoPE'd at
 //   its own position, query taken at the last token. Not a synthetic
 //   row: the online-softmax rescale only fires when a later position's
 //   score beats the running max, and only a genuine sequence produces
@@ -19,7 +19,8 @@
 //            mechanic section 1 was about.
 //
 //   End-to-end accuracy against float attention is NOT asserted here.
-//   It is limited by the 2-bit K cache format, not by this module -
+//   K is INT8 now, and the row reconstructs to 19.40 dB against float
+//   attention (was 4.31 dB at 2-bit K) -
 //   see the commit message and docs/attention_read_design_notes.md.
 //   Asserting a bound here would be measuring the write path's format
 //   choice while pretending to test the scan.
@@ -27,8 +28,8 @@
 module tb_attn_scan;
 
     localparam int N   = 128;
-    localparam int T   = 10;    // positions in the real row
-    localparam int NWK = 14;    // K line words (2b MSE + QJL)
+    localparam int T   = 102;   // positions in the real row
+    localparam int NWK = 32;    // K line words (plain INT8)
     localparam int NWV = 13;    // V line words (3b MSE)
 
     logic clk = 1'b0;
@@ -38,7 +39,7 @@ module tb_attn_scan;
     integer errors = 0;
     integer i, t;
 
-    logic [23:0] yq   [N];
+    logic [31:0] yq   [N];
     logic [31:0] kw   [T*NWK];
     logic [31:0] vw   [T*NWV];
     logic [47:0] exp_o [N];
@@ -54,7 +55,7 @@ module tb_attn_scan;
 
     logic               q_wr, prep_start, prep_done;
     logic [6:0]         q_addr;
-    logic signed [23:0] q_data;
+    logic signed [31:0] q_data;
     logic               scan_start, pos_last, sbusy, pos_done, scan_done;
     logic               k_wv, v_wv;
     logic [31:0]        k_wd, v_wd;
@@ -63,7 +64,7 @@ module tb_attn_scan;
     logic [47:0]        l_out;
     logic signed [15:0] m_out;
 
-    attn_scan #(.N(N), .QBITS_K(2), .QBITS_V(3), .SSHIFT(0)) dut (
+    attn_scan #(.N(N), .QBITS_K(8), .QBITS_V(3), .SSHIFT(0)) dut (
         .clk(clk), .rst_n(rst_n),
         .q_wr(q_wr), .q_addr(q_addr), .q_data(q_data),
         .prep_start(prep_start), .prep_done(prep_done),
@@ -177,7 +178,7 @@ module tb_attn_scan;
     end
 
     initial begin
-        #4000000;
+        #40000000;
         $display("Error: timeout");
         $display("FAILED");
         $finish;

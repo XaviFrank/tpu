@@ -53,7 +53,11 @@ def real_row():
     from tokenizers import Tokenizer
     from quantize_pack import CALIB_TEXTS
     tok = Tokenizer.from_file(fetch_file("tokenizer.json"))
-    ids = tok.encode(CALIB_TEXTS[0]).ids
+    # All the calibration text, not one short sentence: with K now
+    # exact the logits no longer carry quantization noise, and a
+    # 10-position row never crossed an integer max boundary. The
+    # old test's single rescale was partly noise-driven.
+    ids = tok.encode(" ".join(CALIB_TEXTS)).ids
     T = len(ids)
     hdr, ds = load_header()
     hdr.pop("__metadata__", None)
@@ -82,16 +86,14 @@ def real_row():
     return T, hd, q[T-1, QHEAD], k[:, kvh], v[:, kvh]
 
 
-def model(yq, entries, tab, levK, levV):
-    """Bit-exact model of attn_scan.sv."""
-    pk = [[int(yq[i]) * int(levK[kk]) for kk in range(4)] for i in range(N)]
+def model(yq, entries, tab, levV):
+    """Bit-exact model of attn_scan.sv, K at INT8."""
     m, l, o, first, resc = 0, 0, [0]*N, True, 0
 
-    for (cK, sK, vnK, rnK, cV, vnV) in entries:
-        dotA = sum(pk[i][cK[i]] for i in range(N))
-        dotB = sum(-int(yq[i]) if sK[i] else int(yq[i]) for i in range(N))
-        ampk = (rnK * 2896) >> 15
-        score = ((dotA * vnK) >> 15) + dotB * ampk
+    for (kv8, cV, vnV) in entries:
+        # K is plain INT8 and unrotated now: no codebook, no per-vector
+        # norm, no QJL residual. One real MAC per coordinate.
+        score = sum(int(yq[i]) * int(kv8[i]) for i in range(N))
         sp = score >> SSHIFT
 
         m_cand = (sp >> SFRAC) + 1
@@ -121,7 +123,6 @@ def main():
     sign = np.array([int(x, 16) for x in
                      open(os.path.join(RTL, "kv_rot_sign.memh"))], dtype=np.int64)
     d_vec = np.where(sign == 1, -1, 1)
-    thrK, levK = codebook(0, 2)
     thrV, levV = codebook(0, 3)
     tab = [int(x, 16) for x in open(os.path.join(RTL, "exp2_lut.memh"))]
 
@@ -132,27 +133,28 @@ def main():
     vq = np.clip(np.rint(vv / sv), -128, 127).astype(np.int64)
     qq = np.clip(np.rint(qv / sq), -128, 127).astype(np.int64)
 
-    # G folds: both cache scales, 1/sqrt(hd), log2(e), and the N from
-    # (H D q).(H D k) = N (q.k). Solved for the chosen SSHIFT.
+    # G folds both cache scales, 1/sqrt(hd) and log2(e). The N that
+    # (H D q).(H D k) = N (q.k) used to contribute is gone with the
+    # rotation - K is INT8 in the original domain now, so the query is
+    # NOT rotated either.
     G = (sq * sk * math.log2(math.e) * (1 << SFRAC) * (1 << SSHIFT)
-         / (N * math.sqrt(hd)))
-    yq = np.rint((h_mat @ (d_vec * qq)) * G).astype(np.int64)
-    assert np.abs(yq).max() < (1 << 23), "yq overflows 24 bits: %d" % np.abs(yq).max()
+         / math.sqrt(hd))
+    yq = np.rint(qq * G).astype(np.int64)
+    assert np.abs(yq).max() < (1 << 31), "yq overflows 32 bits: %d" % np.abs(yq).max()
 
     entries, kwords, vwords = [], [], []
     for t in range(T):
-        yk = h_mat @ (d_vec * kq[t])
+        # K line: 32 words of packed INT8, no rotation, no norm word
+        acc = 0
+        for val in kq[t]:
+            acc = (acc << 8) | (int(val) & 0xFF)
+        kwords += [(acc >> ((31 - w) * 32)) & 0xFFFFFFFF for w in range(32)]
         yv = h_mat @ (d_vec * vq[t])
-        wk, qk_, _, _, vnK, rnK = quantize(yk, thrK, levK, 2, 1)
         wv, qv_, _, _, vnV, _ = quantize(yv, thrV, levV, 3, 0)
-        sK = [1 if r < 0 else 0 for r in (yk - np.array(
-            [(int(levK[c]) * vnK) >> 15 for c in qk_]))]
-        entries.append((list(map(int, qk_)), sK, vnK, rnK,
-                        list(map(int, qv_)), vnV))
-        kwords += wk
+        entries.append((list(map(int, kq[t])), list(map(int, qv_)), vnV))
         vwords += wv
 
-    o, l, m, resc = model(yq, entries, tab, levK, levV)
+    o, l, m, resc = model(yq, entries, tab, levV)
     assert resc > 0, "no rescale fired - the test would be vacuous"
 
     def w(name, vals, width):
@@ -160,7 +162,7 @@ def main():
             f.write(chr(10).join("%0*x" % (width // 4, int(x) & ((1 << width) - 1))
                                  for x in vals) + chr(10))
 
-    w("attn_yq.memh", yq, 24)
+    w("attn_yq.memh", yq, 32)
     w("attn_kw.memh", kwords, 32)
     w("attn_vw.memh", vwords, 32)
     w("attn_o.memh", o, 48)

@@ -42,7 +42,19 @@
 //   assuming the average.
 //
 //====================================================================
-// NO MULTIPLIER IN EITHER INNER LOOP
+// K IS NOW INT8, SO THE K INNER LOOP HAS A REAL MULTIPLIER
+//   The earlier "no multiplier in either inner loop" result depended
+//   on K being 2-bit: a 4:1 mux over products precomputed once per
+//   head. The end-to-end study moved K to INT8 (top-1 53.3% -> 91.2%),
+//   and at 8 bits there are 256 values per coordinate, so the K side
+//   is a genuine signed MAC - about LANES DSPs. V stays 3-bit and
+//   stays mux-based, so the V loop is still multiplier-free.
+//
+//   K is also no longer rotated, which removes work rather than adding
+//   it: no query rotation, no pk precompute, no per-vector norm, no
+//   QJL term. The score is simply sum_i yq[i]*k[i].
+//
+// (historical, for the V path)
 //   Position-dependent scales factor OUT of the coordinate sum, and
 //   what remains is position-INDEPENDENT, so both dot products become
 //   selection networks over precomputed products:
@@ -86,13 +98,12 @@
 //====================================================================
 module attn_scan #(
     parameter int N       = 128,
-    parameter int QBITS_K = 2,
+    parameter int QBITS_K = 8,   // K is plain INT8 now
     parameter int QBITS_V = 3,
     parameter int SSHIFT  = 12,   // score -> base-2 logit, Q16.16
     parameter int SFRAC   = 16,
     parameter int GUARD   = 16,   // fractional bits below the table's Q1.15
     parameter int MAXN    = 40,   // weight underflow cutoff, in octaves
-    parameter CBK_PATH    = "rtl/kv_cb_m0_b2.memh",
     parameter CBV_PATH    = "rtl/kv_cb_m0_b3.memh",
     parameter EXP2_PATH   = "rtl/exp2_lut.memh"
 )(
@@ -102,7 +113,7 @@ module attn_scan #(
     // ---- per-head setup: rotated, pre-scaled query ----
     input  logic                 q_wr,
     input  logic [$clog2(N)-1:0] q_addr,
-    input  logic signed [23:0]   q_data,
+    input  logic signed [31:0]   q_data,
     input  logic                 prep_start,
     output logic                 prep_done,
 
@@ -127,7 +138,6 @@ module attn_scan #(
 );
 
     localparam int AW     = $clog2(N);
-    localparam int NLEVK  = 1 << QBITS_K;
     localparam int NLEVV  = 1 << QBITS_V;
     localparam int PKW    = 40;
     localparam int OW     = 48;
@@ -136,11 +146,9 @@ module attn_scan #(
 
     localparam logic [AW:0] N_LAST = N - 1;
 
-    (* rom_style = "distributed" *) logic [15:0] cbk [2*NLEVK-1];
     (* rom_style = "distributed" *) logic [15:0] cbv [2*NLEVV-1];
     (* rom_style = "block"       *) logic [15:0] e2  [257];
     initial begin
-        $readmemh(CBK_PATH,  cbk);
         $readmemh(CBV_PATH,  cbv);
         $readmemh(EXP2_PATH, e2);
     end
@@ -158,7 +166,7 @@ module attn_scan #(
     logic [29:0]          v_vnorm, v_rnorm_nc;
     logic                 v_entry, v_busy;
 
-    kv_unpack #(.N(N), .QBITS(QBITS_K), .QJL_EN(1)) u_k (
+    kv_unpack #(.N(N), .QBITS(QBITS_K), .QJL_EN(0), .HAS_NORM(0)) u_k (
         .clk(clk), .rst_n(rst_n), .w_valid(k_w_valid), .w_data(k_w_data),
         .busy(k_busy), .codes(k_codes), .signs(k_signs),
         .vnorm(k_vnorm), .rnorm(k_rnorm), .entry_valid(k_entry));
@@ -179,8 +187,7 @@ module attn_scan #(
     //----------------------------------------------------------------
     // Storage
     //----------------------------------------------------------------
-    logic signed [23:0]  yq  [N];
-    logic signed [PKW-1:0] pk [N*NLEVK];
+    logic signed [31:0]    yq [N];
     logic signed [OW-1:0]  o  [N];
 
     logic [AW:0]           cnt;
@@ -208,74 +215,44 @@ module attn_scan #(
     // N cycles, once per head. This is what makes the scan's inner
     // loop multiplier-free.
     //----------------------------------------------------------------
-    logic signed [23:0] yq_cur;
-    logic signed [15:0] lk0, lk1, lk2, lk3;
-    assign yq_cur = yq[cnt[AW-1:0]];
-    assign lk0 = cbk[NLEVK-1+0];
-    assign lk1 = cbk[NLEVK-1+1];
-    assign lk2 = cbk[NLEVK-1+2];
-    assign lk3 = cbk[NLEVK-1+3];
-
-    logic [AW+1:0] pkbase;
-    assign pkbase = {cnt[AW-1:0], 2'b00};
-
-    always_ff @(posedge clk) begin
-        if (state == S_PREP) begin
-            pk[pkbase + 0] <= yq_cur * lk0;
-            pk[pkbase + 1] <= yq_cur * lk1;
-            pk[pkbase + 2] <= yq_cur * lk2;
-            pk[pkbase + 3] <= yq_cur * lk3;
-        end
-    end
-
     //----------------------------------------------------------------
     // S_KDOT: the selection network. One 4:1 mux and two adders.
     //----------------------------------------------------------------
-    logic [AW-1:0]         ci;
-    logic [QBITS_K-1:0]    kcode;
-    logic                  ksign;
-    logic signed [PKW-1:0] pk_sel;
-    logic signed [47:0]    dotA;
-    logic signed [31:0]    dotB;
-    logic signed [23:0]    yq_i;
+    logic [AW-1:0]      ci;
+    logic [7:0]         kraw;
+    logic signed [8:0]  k_s;
+    logic signed [31:0] yq_i;
+    logic signed [47:0] kprod;
+    logic signed [63:0] dotA;
 
-    assign ci     = cnt[AW-1:0];
-    assign kcode  = k_codes[(N-1-ci)*QBITS_K +: QBITS_K];
-    assign ksign  = k_signs[N-1-ci];
-    assign pk_sel = pk[{ci, kcode}];
-    assign yq_i   = yq[ci];
+    assign ci    = cnt[AW-1:0];
+    assign kraw  = k_codes[(N-1-ci)*8 +: 8];
+    assign k_s   = {kraw[7], kraw};
+    assign yq_i  = yq[ci];
+    assign kprod = yq_i * k_s;          // the one real MAC per lane
 
     always_ff @(posedge clk) begin
         if (state == S_SCORE || state == S_IDLE) begin
             dotA <= '0;
-            dotB <= '0;
         end else if (state == S_KDOT) begin
-            dotA <= dotA + {{(48-PKW){pk_sel[PKW-1]}}, pk_sel};
-            dotB <= dotB + (ksign ? -{{8{yq_i[23]}}, yq_i}
-                                  :  {{8{yq_i[23]}}, yq_i});
+            dotA <= dotA + {{16{kprod[47]}}, kprod};
         end
     end
 
     //----------------------------------------------------------------
     // S_SCORE: fold the per-entry scalars back in. Two multiplies.
     //----------------------------------------------------------------
-    logic signed [79:0] scoreA, scoreA_sh, score;
-    logic signed [79:0] scoreB;
-    logic signed [79:0] ampk, ampk_sh;
+    logic signed [79:0] score;
     logic signed [31:0] sprime, sprime_q;
 
-    // Every rescale here is an ARITHMETIC shift of the full-width
-    // signed value, then a truncation. Taking a part-select such as
-    // scoreA[78:15] instead drops the sign bit and silently turns
-    // negative logits positive - and attention logits are routinely
-    // negative, so it would not even be a rare case.
-    assign ampk     = $signed({1'b0, k_rnorm}) * 80'sd2896;   // rnorm/sqrt(N)
-    assign ampk_sh  = ampk >>> 15;
-    assign scoreA   = dotA * $signed({1'b0, k_vnorm});
-    assign scoreA_sh= scoreA >>> 15;
-    assign scoreB   = dotB * ampk_sh;
-    assign score    = scoreA_sh + scoreB;
-    assign sprime   = (score >>> SSHIFT);
+    // Arithmetic shift of the full-width signed value, then truncate.
+    // A part-select would drop the sign bit and turn negative logits
+    // positive, and attention logits are routinely negative.
+    // No per-vector norm and no QJL residual on an INT8 K line, so the
+    // score is the raw dot product; all constant scaling (both cache
+    // scales, 1/sqrt(d_head), log2(e)) is folded into yq once per head.
+    assign score  = {{16{dotA[63]}}, dotA};
+    assign sprime = (score >>> SSHIFT);
 
     always_ff @(posedge clk) begin
         if (state == S_SCORE) sprime_q <= sprime;
