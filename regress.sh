@@ -124,6 +124,9 @@ run_tb tb_kv_dequant     rtl/kv_rotate.sv rtl/kv_quantize.sv \
                          rtl/kv_cache_store.sv rtl/kv_unpack.sv \
                          rtl/kv_dequant.sv tb/tb_kv_dequant.sv
 
+# --- attention read path: streaming scan + online softmax (1 Q head) ---
+run_tb tb_attn_scan      rtl/kv_unpack.sv rtl/attn_scan.sv tb/tb_attn_scan.sv
+
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
