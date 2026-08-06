@@ -64,15 +64,41 @@ So the table only ever covers `f ∈ [0,1)` — far easier than SiLU's,
 which had to span its whole input range and needed a 257th entry to
 avoid a wrap bug. Measured linear-interpolation error:
 
-| entries | step | rel. interp error | effective bits |
+| entries | step | curvature-only rel. error | effective bits |
 |---|---|---|---|
 | 128 | 0.0078 | 3.67e-06 | 18.1 |
 | **256** | **0.0039** | **9.16e-07** | **20.1** |
 | 512 | 0.0020 | 2.29e-07 | 22.1 |
 
-**256 entries + 1 endpoint, 16-bit Q0.16** — 4.1 kbit, against RoPE's
-262 kbit. 20 bits of accuracy is far past what V's 3-bit quantization
-(~13 dB ≈ 2.2 bits) can use, so the table is not the limiting term.
+**256 intervals + 1 endpoint, 16-bit Q1.15** — 4.1 kbit, against RoPE's
+262 kbit. Q1.15 rather than Q0.16 because `2^0 = 1.0` would be 65536
+and overflow the word; in Q1.15 the range `(0.5, 1]` maps to
+`(16384, 32768]`. 257 entries, not 256, for the same reason
+`swiglu_gate` needed a 257th: linear interpolation of the last interval
+needs the `f=1` endpoint, and `2^-f` is not periodic. (RoPE's
+identical-looking wrap *is* correct, because sine is.)
+
+### Correction: the table's accuracy is 13.5 bits, not 20.1
+
+The 20.1 above is **curvature only** — the error of a linear
+interpolant against a smooth function. It ignores the two things the
+hardware actually does: round the table entries to Q1.15 integers, and
+truncate the interpolation product by `>> 8`. Measured end-to-end
+against exact `2^-f` (`tb/gen_attn_exp2.py`):
+
+```
+  worst abs 1.489 LSB    worst rel 8.588e-05    = 13.5 effective bits
+```
+
+So the limit is the **word width, not the table length** — the error is
+integer LSB rounding in the interpolation arithmetic, and adding
+entries would not move it. The lever, if it were ever needed, is a
+wider word.
+
+It is not needed: 13.5 bits is ~1e-4 relative, three orders of
+magnitude below V's 3-bit quantization floor (~13 dB ≈ 2.2 bits). The
+conclusion that the table is not the limiting term survives; the number
+I predicted for it did not.
 
 ### Accumulator widths — derived, not assumed
 
