@@ -124,6 +124,10 @@ run_tb tb_kv_dequant     rtl/kv_rotate.sv rtl/kv_quantize.sv \
                          rtl/kv_cache_store.sv rtl/kv_unpack.sv \
                          rtl/kv_dequant.sv tb/tb_kv_dequant.sv
 
+# --- KV write path: INT8 K line (K moved off low-bit after the
+# --- end-to-end study; V stays 3-bit) ---
+run_tb tb_kv_pack_int8   rtl/kv_pack_int8.sv rtl/kv_unpack.sv                          tb/tb_kv_pack_int8.sv
+
 # --- attention read path: streaming scan + online softmax (1 Q head) ---
 run_tb tb_attn_scan      rtl/kv_unpack.sv rtl/attn_scan.sv tb/tb_attn_scan.sv
 

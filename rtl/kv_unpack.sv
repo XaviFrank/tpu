@@ -38,7 +38,11 @@
 module kv_unpack #(
     parameter int N      = 128,
     parameter int QBITS  = 3,
-    parameter int QJL_EN = 0
+    parameter int QJL_EN = 0,
+    // INT8 K lines carry no per-vector norm - they use a
+    // per-tensor calibration scale - and dropping the slot keeps
+    // the line at exactly 32 words, so w_idx stays 5 bits.
+    parameter int HAS_NORM = 1
 )(
     input  logic clk,
     input  logic rst_n,
@@ -55,7 +59,8 @@ module kv_unpack #(
 );
 
     localparam int NWQ    = (N * QBITS) / 32;
-    localparam int NWORDS = (QJL_EN != 0) ? (NWQ + 6) : (NWQ + 1);
+    localparam int NWORDS = NWQ + (HAS_NORM != 0 ? 1 : 0)
+                                + (QJL_EN  != 0 ? 5 : 0);
     localparam int QB     = N * QBITS;
 
     typedef enum logic [0:0] { U_IDLE, U_LOAD } state_t;
