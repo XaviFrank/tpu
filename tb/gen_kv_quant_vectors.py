@@ -76,6 +76,43 @@ def quantize(y, thr_q15, lev_q15, qbits, qjl):
     return words, q, rec, resid, vnorm, rnorm
 
 
+def append_set():
+    """Eight DISTINCT real K vectors for the append/addressing test.
+
+    Distinctness is the whole point: appending one vector eight times
+    would pass even if every slot aliased to the same address. These
+    are token 0's eight KV heads, so the rows differ genuinely rather
+    than by a synthetic perturbation.
+    """
+    import sys
+    sys.path.insert(0, HERE)
+    import gen_kv_vectors as G
+
+    _, nkv, _, quant = G._build()
+    h_mat, d_vec, _ = G.rot_tables()
+    thr_q15, lev_q15 = codebook(0, 2)
+
+    xs, ws = [], []
+    for h in range(nkv):
+        x = quant["k"][h]                    # token 0, head h
+        y = h_mat @ (d_vec * x)
+        words, _, _, _, _, _ = quantize(y, thr_q15, lev_q15, 2, 1)
+        xs.append(x)
+        ws.append(words)
+
+    with open(os.path.join(HERE, "kv_app_x.memh"), "w") as f:
+        f.write(chr(10).join("%02x" % (int(v) & 0xFF)
+                             for x in xs for v in x) + chr(10))
+    with open(os.path.join(HERE, "kv_app_exp.memh"), "w") as f:
+        f.write(chr(10).join("%08x" % w for wv in ws for w in wv) + chr(10))
+
+    uniq = len(set(tuple(w) for w in ws))
+    print("append set: %d real K vectors (token 0, heads 0..%d), "
+          "%d words each, %d distinct packed lines"
+          % (len(xs), nkv - 1, len(ws[0]), uniq))
+    assert uniq == len(ws), "append vectors are not distinct - test would be vacuous"
+
+
 def main():
     for mode, rotname in ((0, "had"), (1, "pi")):
         for which, qbits, qjl in (("v", 3, 0), ("k", 2, 1)):
@@ -102,6 +139,7 @@ def main():
             if qjl:
                 print("     residual norm %d  (%.1f%% of ||y||)"
                       % (rnorm, 100.0 * rnorm / vnorm))
+    append_set()
 
 
 if __name__ == "__main__":
