@@ -34,7 +34,18 @@
 module attn_scan_gqa #(
     parameter int N      = 128,
     parameter int NQ     = 2,     // Q heads per KV head
-    parameter int SSHIFT = 0
+    parameter int SSHIFT = 0,
+    // Promoted from attn_scan so they are ROOT-module parameters at
+    // this top. Vivado's -generic only overrides root parameters, so
+    // leaving them on the child means the override silently does
+    // nothing and the ROM initialises to zero - which is exactly the
+    // failure rmsnorm/swiglu_gate/rope hit (commit e5489dc), where a
+    // synth run reported a plausible DSP count from a table that had
+    // never loaded. Forwarded to every instance below.
+    //   -generic CBV_PATH=C:/dev/tpu/rtl/kv_cb_m0_b3.memh
+    //   -generic EXP2_PATH=C:/dev/tpu/rtl/exp2_lut.memh
+    parameter CBV_PATH   = "rtl/kv_cb_m0_b3.memh",
+    parameter EXP2_PATH  = "rtl/exp2_lut.memh"
 )(
     input  logic clk,
     input  logic rst_n,
@@ -74,7 +85,8 @@ module attn_scan_gqa #(
         logic qw;
         assign qw = q_wr && (q_head == g[$clog2(NQ)-1:0]);
 
-        attn_scan #(.N(N), .QBITS_K(8), .QBITS_V(3), .SSHIFT(SSHIFT)) u (
+        attn_scan #(.N(N), .QBITS_K(8), .QBITS_V(3), .SSHIFT(SSHIFT),
+                    .CBV_PATH(CBV_PATH), .EXP2_PATH(EXP2_PATH)) u (
             .clk        (clk),
             .rst_n      (rst_n),
             .q_wr       (qw),
