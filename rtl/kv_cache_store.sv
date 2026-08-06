@@ -70,9 +70,9 @@ module kv_cache_store #(
     localparam int DEPTH = MAX_POS * WORDS_PER_VEC;
     localparam int AW    = $clog2(DEPTH);
 
-    if (DEPTH < 32) begin : gen_depth_min
+    if (DEPTH > 65536) begin : gen_depth_max
         initial begin
-            $error("kv_cache_store: DEPTH (%0d) too small for a 5-bit offset",
+            $error("kv_cache_store: DEPTH (%0d) exceeds the 16-bit address math",
                    DEPTH);
             $fatal(1);
         end
@@ -80,25 +80,29 @@ module kv_cache_store #(
 
     (* ram_style = "block" *) logic [31:0] mem [DEPTH];
 
-    logic [AW-1:0]   wbase, waddr, raddr, rmul, rpos_ext;
+    // Address arithmetic is done at a FIXED 16 bits and then narrowed,
+    // rather than at AW. Deriving the widths from AW looks tidier but
+    // breaks for small MAX_POS: a 5-bit word offset zero-extended to
+    // AW is a zero-width replication once AW <= 5, which is exactly
+    // the configuration a round-trip testbench wants to instantiate.
+    // The upper bits fold away in synthesis, so this costs nothing.
+    logic [15:0]     wbase, waddr, raddr, rmul;
     logic [POSW-1:0] pos;
 
     assign full  = (pos == MAX_POS[POSW-1:0]);
     assign n_pos = pos;
 
-    assign waddr = wbase + {{(AW-5){1'b0}}, w_idx};
-
-    assign rpos_ext = {{(AW-POSW){1'b0}}, rd_pos};
-    assign rmul     = rpos_ext * WORDS_PER_VEC[AW-1:0];
-    assign raddr    = rmul + {{(AW-5){1'b0}}, rd_widx};
+    assign waddr = wbase + {11'b0, w_idx};
+    assign rmul  = {{(16-POSW){1'b0}}, rd_pos} * WORDS_PER_VEC[15:0];
+    assign raddr = rmul + {11'b0, rd_widx};
 
     // Datapath memory: no reset, per house style.
     always_ff @(posedge clk) begin
-        if (w_valid && !full) mem[waddr] <= w_data;
+        if (w_valid && !full) mem[waddr[AW-1:0]] <= w_data;
     end
 
     always_ff @(posedge clk) begin
-        if (rd_en) rd_data <= mem[raddr];
+        if (rd_en) rd_data <= mem[raddr[AW-1:0]];
     end
 
     // Control registers: async reset.
@@ -116,7 +120,7 @@ module kv_cache_store #(
                 overflow <= 1'b1;
             end else begin
                 pos   <= pos + 1'b1;
-                wbase <= wbase + WORDS_PER_VEC[AW-1:0];
+                wbase <= wbase + WORDS_PER_VEC[15:0];
             end
         end
     end

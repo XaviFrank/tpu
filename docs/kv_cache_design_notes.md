@@ -170,6 +170,57 @@ a confident, wrong conclusion.
 
 ---
 
+## 3b. The step-1 question, answered — measured round trip, 816 vectors each
+
+Full path, real layer-0 vectors, hardware-exact model:
+`x → rotate → quantize → pack → append → read back → reconstruct →
+inverse rotate → x_hat`, compared against the original `x`.
+
+| | mean | sd | worst | best |
+|---|---|---|---|---|
+| Hadamard, V (3b) | 13.74 dB | 1.35 | 7.91 | 16.57 |
+| dense Π, V (3b) | 13.51 dB | 1.21 | 8.18 | 15.35 |
+| Hadamard, K (2b+QJL) | **15.72 dB** | **4.38** | 2.80 | 23.78 |
+| dense Π, K (2b+QJL) | 10.15 dB | 1.90 | 1.98 | 12.34 |
+
+**V is a tie.** Hadamard is +0.22 dB on the mean and *−0.27 dB* at the
+worst case. Nothing separates them.
+
+**K favours Hadamard on the mean by +5.57 dB — but the worst case is
++0.82 dB, essentially a tie, and Hadamard's spread is more than double
+(sd 4.38 vs 1.90).** Hadamard is better on average and less
+predictable. A plausible cause, *not verified here*: QJL reconstruction
+spreads the residual norm evenly across coordinates, which fits the
+Hadamard path's flatter residual better than the Haar path's Gaussian
+one. Confirming that needs the read side.
+
+Note this **inverts the step-3 rotated-domain reading**, where dense Π
+had the tighter K/V spread (0.02 dB vs 2.87 dB). End to end the spread
+is Hadamard 1.98 dB, dense Π 3.36 dB. The tight spread dense Π shows at
+the quantizer does not survive the QJL stage and the inverse rotation —
+which is exactly why the round trip, not the intermediate statistic, is
+the thing the spec asked to measure.
+
+### Recommendation
+
+**Take the Hadamard path (`ROT_MODE = 0`) as the default.** It is free —
+no DSP, no 16 KB ROM, negligible cycles against dense Π's ~3% of a
+token — and across 3264 measured round trips it is never meaningfully
+worse: +0.82 dB at K's worst case, 0.27 dB behind at V's.
+
+This does **not** match what TurboQuant prescribes, and the reason is
+specific to this hardware: the paper's guarantee buys predictable
+distortion on unseen distributions, and in float on a GPU that costs
+almost nothing extra. Here the dense rotation additionally has to be
+quantized to INT8, at d=128, where its theoretical advantage is
+measurably absent.
+
+The guarantee argument is *weakened, not dead* — Hadamard's higher K
+variance is the shape of exactly the concern it names, and only layer 0
+has been characterized. The cheap insurance is that `ROT_MODE` stays a
+parameter: switching costs a codebook re-fit and array time, not a
+redesign.
+
 ## 4. Decisions taken
 
 **Rotation — pluggable, both built, measured.** `ROT_MODE` selects
