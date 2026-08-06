@@ -73,11 +73,43 @@ matrix-vector product — precisely what the weight-stationary array
 already does. It can reuse `ws_array` + `ws_tiling_engine`
 (128×128 = 64 tiles of 16×16) at zero new DSPs, spending array time
 instead. Batching the 16 K/V vectors per layer amortizes weight reload
-to ~50% utilization (~267 µs/token, ~3% of an ~8 ms token); the Week-4
-double-buffered prefetch could hide most of that.
+to ~50% utilization, **~267 µs of array time per token**.
 
-So dense is *affordable* — it buys a scheduling and buffering problem,
-not a free lunch.
+### What that 267 µs is a fraction OF — compute-bound ≠ token latency
+
+An earlier draft of this note divided it by an "~8 ms token" and called
+it 3%. **That denominator was array-compute time only, and it was also
+arithmetically wrong** — it omitted `lm_head`. Both numbers are
+restated here because the compute-bound figure is not a token latency
+and must not be used as one.
+
+| | value |
+|---|---|
+| matmul MAC/token (28 layers + lm_head) | 596.0 M |
+| array peak, 16×16 @ 215 MHz | 55.0 GMAC/s |
+| **compute-only time** | **10.8 ms/token** |
+| INT8 weight bytes/token, batch 1 | 596.0 MB |
+| arithmetic intensity | **1.0 MAC/byte** |
+| bandwidth needed to saturate the array | ~55 GB/s |
+| realistic board DDR | ~1.2–2.1 GB/s |
+| **DRAM-bound token latency** | **~280–500 ms** |
+| resulting array utilization | **2–4%** |
+
+Batch-1 decode of a dense model reads every weight exactly once per
+token, so arithmetic intensity is ~1 MAC/byte and the design is
+bandwidth-bound by a factor of ~30–40×. The array idles ~97% of the
+time waiting on weights. **The real end-to-end number is hundreds of ms
+per token, not 8 ms.**
+
+Against that, the rotation is **~0.07% of a token**, not 3% — and
+better than that in practice, because Π is 16 KB and stays
+**on-chip resident**, so the rotation adds **zero DRAM traffic** and
+its array time can hide entirely in the weight-fetch stall shadow that
+already dominates the schedule.
+
+So dense is *more* affordable than the first estimate claimed. What it
+buys is a scheduling and buffering problem plus 16 KB of ROM, not a
+latency cost.
 
 **This inverts the acceptance check in the spec's §8.** Seeing DSPs is
 no longer evidence of a mistake. For a dense-mode build, seeing *zero*
@@ -203,10 +235,21 @@ the thing the spec asked to measure.
 
 ### Recommendation
 
-**Take the Hadamard path (`ROT_MODE = 0`) as the default.** It is free —
-no DSP, no 16 KB ROM, negligible cycles against dense Π's ~3% of a
-token — and across 3264 measured round trips it is never meaningfully
-worse: +0.82 dB at K's worst case, 0.27 dB behind at V's.
+**Take the Hadamard path (`ROT_MODE = 0`) as the default — but on the
+accuracy and area evidence, not on latency.**
+
+Across 3264 measured round trips it is never meaningfully worse: +0.82
+dB at K's worst case, 0.27 dB behind at V's. It costs no DSP and no
+16 KB ROM.
+
+**The latency argument for it is dead**, and that is a correction to
+the first draft of this note. Once the token is understood as
+DRAM-bound at ~280–500 ms rather than compute-bound at 8 ms, dense Π's
+267 µs of array time is ~0.07% of a token and hides in stall shadow
+besides. Rotation cost is simply not a discriminator between the two
+modes; it never was, and the earlier "3% vs free" framing overstated
+it. What survives is that Hadamard is equal-or-better on measured
+accuracy and strictly cheaper in area.
 
 This does **not** match what TurboQuant prescribes, and the reason is
 specific to this hardware: the paper's guarantee buys predictable

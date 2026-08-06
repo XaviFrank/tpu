@@ -64,9 +64,23 @@
 //   not LUTRAM (no dual-write LUTRAM exists) and not BRAM. Expect
 //   ~3 kbit of FF and a few thousand LUTs of mux at N=128. If Vivado
 //   says that is too expensive, the fix is to serialize the butterfly
-//   over banks, which costs cycles this design has in abundance -
-//   448 rotations per token against an ~8 ms token budget. Recorded
-//   now so a large LUT number reads as expected, not as a surprise.
+//   over banks, which costs cycles this design has in abundance - see
+//   the cycle-budget note below. Recorded now so a large LUT number
+//   reads as expected, not as a surprise.
+//
+//====================================================================
+// CYCLE BUDGET - the token is BANDWIDTH-bound, not compute-bound
+//   Batch-1 decode reads every weight exactly once per token: 596 MB
+//   of INT8 against 596 MMAC, an arithmetic intensity of ~1 MAC/byte.
+//   Saturating this array would take ~55 GB/s; the board has ~1-2
+//   GB/s. So a token is ~280-500 ms of DRAM time wrapped around 10.8
+//   ms of compute, and the array sits idle ~97% of the time.
+//
+//   Rotation cost must be read against THAT, not against the 10.8 ms
+//   compute figure. 448 rotations/token is 267 us of array time,
+//   ~0.07% of a real token, and both tables here are small enough to
+//   stay on-chip, so neither mode adds DRAM traffic. Rotation cost is
+//   not a discriminator between the modes - accuracy and area are.
 //====================================================================
 module kv_rotate #(
     parameter int N        = 128,   // head_dim
@@ -193,9 +207,10 @@ module kv_rotate #(
         // index i with i XOR 2^s, over the HALF indices that have bit
         // s clear; the index arithmetic below is "insert a zero bit at
         // position s into the pair counter", which enumerates exactly
-        // those. STAGES*HALF = 448 cycles per vector, against a budget
-        // of ~8 ms per token for 448 vectors - deliberately the dull
-        // serial form, because there is no throughput pressure here.
+        // those. STAGES*HALF = 448 cycles per vector. Deliberately the
+        // dull serial form: per the cycle-budget note above the array
+        // is idle ~97% of a bandwidth-bound token, so there is no
+        // throughput pressure here at all.
         //------------------------------------------------------------
         (* rom_style = "distributed" *) logic [7:0] sign_rom [N];
         initial $readmemh(ROT_SIGN_PATH, sign_rom);
@@ -261,10 +276,10 @@ module kv_rotate #(
         // fixed and data-oblivious, so in the real system this is a
         // fixed-matrix matvec that belongs on ws_array via
         // ws_tiling_engine (128x128 = 64 tiles of 16x16) at zero new
-        // DSPs, ~3% of a token. What matters for the ROT_MODE
-        // comparison is the NUMERICS, which are identical either way,
-        // so this file keeps the small serial version and the design
-        // note carries the deployment mapping.
+        // DSPs and ~0.07% of a bandwidth-bound token. What matters for
+        // the ROT_MODE comparison is the NUMERICS, which are identical
+        // either way, so this file keeps the small serial version and
+        // the design note carries the deployment mapping.
         //
         // The Pi ROM read is REGISTERED. A combinational read of a
         // 16384-entry array cannot infer BRAM and would land 16 KB in
