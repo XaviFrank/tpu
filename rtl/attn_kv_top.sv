@@ -37,20 +37,25 @@
 //   Both are exercised by tb_attn_kv_top.
 //
 //====================================================================
-// ONE CACHE PER INSTANCE - the 28-layer question, stated not hidden
-//   A transformer layer's KV cache is private to that layer. This block
-//   owns exactly one K store and one V store, so calling it 28 times in
-//   a row does NOT give 28 caches; it gives one cache with 28 layers'
-//   worth of vectors appended into it, which is wrong.
+// ONE CACHE, NUM_LAYERS REGIONS - `layer` selects which
+//   A transformer layer's KV cache is private to that layer, so a
+//   28-layer decode needs 28 of them. This block does NOT own 28
+//   stores; it owns one K store and one V store carved into NUM_LAYERS
+//   regions, and `layer` picks the region for the whole invocation.
 //
-//   That is a system-integration decision and it is deliberately NOT
-//   made here. The three real options are: instantiate 28 of these
-//   (BRAM-prohibitive), widen kv_cache_store's addressing with a layer
-//   offset (cheap, one more input, but 28x the on-chip capacity is
-//   still prohibitive at useful context), or back the store with DRAM
-//   (the eventual answer per kv_cache_store's own scope note). Whoever
-//   builds the layer loop must pick one; this module exposes `clear`
-//   and `n_pos` so that whichever is picked has something to drive.
+//   Instantiating 28 stores would have cost the same on-chip memory
+//   and neither approach reaches useful context (~1.65 GB at 40960),
+//   so the tie-breaker was which one survives the move to DRAM. A
+//   layer index folded into an address is exactly what a DRAM-backed
+//   cache needs; 28 separate instances would have to be collapsed back
+//   into one address space to talk to a memory controller at all. Full
+//   reasoning in kv_cache_store's header.
+//
+//   `layer` is LATCHED at go. Both write and read phases of one
+//   invocation then use the sampled value, so a caller that changes
+//   `layer` mid-invocation cannot write layer A's line and read layer
+//   B's cache. While idle the outputs follow the live input, so
+//   `n_pos` can be polled per layer without starting anything.
 //
 //====================================================================
 // WHY THE SEQUENCER WAITS FOR !busy BETWEEN POSITIONS
@@ -66,7 +71,8 @@
 module attn_kv_top #(
     parameter int N        = 128,   // head_dim
     parameter int NQ       = 2,     // Q heads sharing this KV head
-    parameter int MAX_POS  = 102,   // cache capacity, in positions
+    parameter int MAX_POS  = 102,   // cache capacity, in positions PER LAYER
+    parameter int NUM_LAYERS = 1,   // transformer layers sharing the cache
     parameter int QBITS_V  = 3,
     parameter int ROT_MODE = 0,     // V-side rotation: 0 = Hadamard
     parameter int SSHIFT   = 0,
@@ -87,7 +93,11 @@ module attn_kv_top #(
     parameter CB_PATH       = "rtl/kv_cb_m0_b3.memh",
     parameter EXP2_PATH     = "rtl/exp2_lut.memh",
     parameter ROT_SIGN_PATH = "rtl/kv_rot_sign.memh",
-    parameter ROT_PI_PATH   = "rtl/kv_rot_pi.memh"
+    parameter ROT_PI_PATH   = "rtl/kv_rot_pi.memh",
+    // DERIVED - do not override. Same reason as kv_cache_store's LAYW:
+    // a port width cannot reference a localparam, and $clog2(1) is 0.
+    parameter int LAYW      = (NUM_LAYERS <= 1) ? 1
+                                                : $clog2(NUM_LAYERS)
 )(
     input  logic clk,
     input  logic rst_n,
@@ -96,6 +106,10 @@ module attn_kv_top #(
     // is live mid-invocation and resetting it there would corrupt the
     // line being written. Apply between invocations.
     input  logic clear,
+
+    // Which layer's cache this invocation appends to and scans.
+    // Sampled at go; free to change between invocations.
+    input  logic [LAYW-1:0]       layer,
 
     // ---- this token's K and V, INT8, before quantization ----
     input  logic                  xk_wr,
@@ -232,17 +246,32 @@ module attn_kv_top #(
 
     assign st_clear = clear && !busy;
 
-    kv_cache_store #(.WORDS_PER_VEC(NWK), .MAX_POS(MAX_POS)) u_kstore (
-        .clk(clk), .rst_n(rst_n), .clear(st_clear),
+    // Latched at go, live while idle - see the header. Both stores and
+    // both ports see the same value, because one invocation is one
+    // layer by construction.
+    logic [LAYW-1:0] layer_lat, layer_eff;
+    assign layer_eff = busy ? layer_lat : layer;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                     layer_lat <= '0;
+        else if ((tst == T_IDLE) && go) layer_lat <= layer;
+    end
+
+    kv_cache_store #(.WORDS_PER_VEC(NWK), .MAX_POS(MAX_POS),
+                     .NUM_LAYERS(NUM_LAYERS)) u_kstore (
+        .clk(clk), .rst_n(rst_n), .clear(st_clear), .w_layer(layer_eff),
         .w_valid(kp_wv), .w_idx(kp_wi), .w_data(kp_wd), .commit(kp_done),
         .n_pos(kn_pos), .full(k_full), .overflow(k_ovf),
-        .rd_en(krd_en), .rd_pos(krd_pos), .rd_widx(krd_wi), .rd_data(krd_d));
+        .rd_en(krd_en), .rd_layer(layer_eff),
+        .rd_pos(krd_pos), .rd_widx(krd_wi), .rd_data(krd_d));
 
-    kv_cache_store #(.WORDS_PER_VEC(NWV), .MAX_POS(MAX_POS)) u_vstore (
-        .clk(clk), .rst_n(rst_n), .clear(st_clear),
+    kv_cache_store #(.WORDS_PER_VEC(NWV), .MAX_POS(MAX_POS),
+                     .NUM_LAYERS(NUM_LAYERS)) u_vstore (
+        .clk(clk), .rst_n(rst_n), .clear(st_clear), .w_layer(layer_eff),
         .w_valid(vq_wv), .w_idx(vq_wi), .w_data(vq_wd), .commit(vq_done),
         .n_pos(vn_pos), .full(v_full), .overflow(v_ovf),
-        .rd_en(vrd_en), .rd_pos(vrd_pos), .rd_widx(vrd_wi), .rd_data(vrd_d));
+        .rd_en(vrd_en), .rd_layer(layer_eff),
+        .rd_pos(vrd_pos), .rd_widx(vrd_wi), .rd_data(vrd_d));
 
     // The two stores are written by independent producers, so a
     // disagreement in their position counts is a real symptom (a

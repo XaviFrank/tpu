@@ -18,6 +18,12 @@
 //   that overflow asserts AND that slot 7 still reads back correctly.
 //   An overflow that quietly wrapped would corrupt the oldest entries
 //   while every status bit still looked healthy.
+//
+//   A5/A6 use a SECOND store at NUM_LAYERS=3, fed by the same write
+//   chain. Three, not two or four: NUM_LAYERS must not be a power of
+//   two for an out-of-range layer index to be reachable at all, and 28
+//   is not a power of two. At NUM_LAYERS=4 the range check would be
+//   vacuous and A6 would silently test nothing.
 //====================================================================
 module tb_kv_cache_store;
 
@@ -73,10 +79,29 @@ module tb_kv_cache_store;
         .busy(qbusy), .w_valid(wv), .w_idx(wi), .w_data(wd), .done(qdone));
 
     kv_cache_store #(.WORDS_PER_VEC(NW), .MAX_POS(NVEC)) cache (
-        .clk(clk), .rst_n(rst_n), .clear(clear),
+        .clk(clk), .rst_n(rst_n), .clear(clear), .w_layer(1'b0),
         .w_valid(wv), .w_idx(wi), .w_data(wd), .commit(qdone),
         .n_pos(n_pos), .full(full), .overflow(ovf),
-        .rd_en(rd_en), .rd_pos(rd_pos), .rd_widx(rd_widx), .rd_data(rd_data));
+        .rd_en(rd_en), .rd_layer(1'b0),
+        .rd_pos(rd_pos), .rd_widx(rd_widx), .rd_data(rd_data));
+
+    // Second store, three layers, driven by the SAME write chain so a
+    // layer append is the real producer's timing, not a stimulus.
+    logic       clear2, full2, ovf2;
+    logic [1:0] lay_w, lay_r;
+    logic [3:0] n_pos2;
+    logic       rd_en2;
+    logic [3:0] rd_pos2;
+    logic [4:0] rd_widx2;
+    logic [31:0] rd_data2;
+
+    kv_cache_store #(.WORDS_PER_VEC(NW), .MAX_POS(NVEC),
+                     .NUM_LAYERS(3)) cache2 (
+        .clk(clk), .rst_n(rst_n), .clear(clear2), .w_layer(lay_w),
+        .w_valid(wv), .w_idx(wi), .w_data(wd), .commit(qdone),
+        .n_pos(n_pos2), .full(full2), .overflow(ovf2),
+        .rd_en(rd_en2), .rd_layer(lay_r),
+        .rd_pos(rd_pos2), .rd_widx(rd_widx2), .rd_data(rd_data2));
 
     //----------------------------------------------------------------
     integer v, w;
@@ -113,11 +138,42 @@ module tb_kv_cache_store;
         end
     endtask
 
+    task automatic readback2(input integer ly, input integer vec,
+                             input integer wi_, output logic [31:0] got);
+        begin
+            @(negedge clk);
+            rd_en2   = 1'b1;
+            lay_r    = ly[1:0];
+            rd_pos2  = vec[3:0];
+            rd_widx2 = wi_[4:0];
+            @(negedge clk);
+            rd_en2   = 1'b0;
+            @(negedge clk);
+            got      = rd_data2;
+        end
+    endtask
+
+    // check every word of one layer/slot against source vector `src`
+    task automatic chk_layer(input integer ly, input integer vec,
+                             input integer src, output integer nbad);
+        integer ww;
+        logic [31:0] gg;
+        begin
+            nbad = 0;
+            for (ww = 0; ww < NW; ww = ww + 1) begin
+                readback2(ly, vec, ww, gg);
+                if (gg !== app_exp[src*NW + ww]) nbad = nbad + 1;
+            end
+        end
+    endtask
+
     logic [31:0] g;
-    integer bad;
+    integer bad, bad2;
 
     initial begin
         start = 0; clear = 0; rd_en = 0; rd_pos = 0; rd_widx = 0;
+        clear2 = 0; rd_en2 = 0; lay_w = 0; lay_r = 0;
+        rd_pos2 = 0; rd_widx2 = 0;
         repeat (4) @(negedge clk);
         rst_n = 1'b1;
         repeat (2) @(negedge clk);
@@ -198,6 +254,68 @@ module tb_kv_cache_store;
         errors = errors + bad;
         $display("  A4 after clear: n_pos %0d, re-append lands at slot 0, %0d/%0d exact",
                  n_pos, NW - bad, NW);
+
+        // ---- A5: layers do not alias ------------------------------
+        @(negedge clk); clear2 = 1'b1;
+        @(negedge clk); clear2 = 1'b0;
+        @(negedge clk);
+
+        lay_w = 2'd0; append(0);       // vector 0 -> layer 0, slot 0
+        lay_w = 2'd2; append(1);       // vector 1 -> layer 2, slot 0
+        lay_w = 2'd2; append(5);       // vector 5 -> layer 2, slot 1
+
+        chk_layer(0, 0, 0, bad);  errors = errors + bad;  bad2 = bad;
+        chk_layer(2, 0, 1, bad);  errors = errors + bad;  bad2 = bad2 + bad;
+        chk_layer(2, 1, 5, bad);  errors = errors + bad;  bad2 = bad2 + bad;
+        if (bad2 != 0)
+            $display("Error: A5 %0d words wrong across the three layer/slot reads", bad2);
+
+        lay_w = 2'd0;
+        @(negedge clk); @(negedge clk);
+        if (n_pos2 !== 4'd1) begin
+            errors = errors + 1;
+            $display("Error: A5 layer 0 n_pos %0d expected 1", n_pos2);
+        end
+        lay_w = 2'd1;
+        @(negedge clk); @(negedge clk);
+        if (n_pos2 !== 4'd0) begin
+            errors = errors + 1;
+            $display("Error: A5 untouched layer 1 n_pos %0d expected 0", n_pos2);
+        end
+        lay_w = 2'd2;
+        @(negedge clk); @(negedge clk);
+        if (n_pos2 !== 4'd2) begin
+            errors = errors + 1;
+            $display("Error: A5 layer 2 n_pos %0d expected 2", n_pos2);
+        end
+        if (ovf2) begin
+            errors = errors + 1;
+            $display("Error: A5 overflow set during valid layer appends");
+        end
+        $display("  A5 three layers, %0d/%0d words exact, per-layer n_pos 1/0/2",
+                 3*NW - bad2, 3*NW);
+
+        // ---- A6: an out-of-range layer is loud, not aliased -------
+        lay_w = 2'd3;                  // NUM_LAYERS is 3, so 3 is bad
+        append(4);
+        if (!ovf2) begin
+            errors = errors + 1;
+            $display("Error: A6 out-of-range layer did not set overflow");
+        end
+        // it must not have landed on the clamped layer 0 either
+        chk_layer(0, 0, 0, bad);
+        errors = errors + bad;
+        if (bad != 0)
+            $display("Error: A6 out-of-range append corrupted layer 0 (%0d words)", bad);
+        lay_w = 2'd0;
+        @(negedge clk); @(negedge clk);
+        if (n_pos2 !== 4'd1) begin
+            errors = errors + 1;
+            $display("Error: A6 layer 0 n_pos advanced to %0d on a bad-layer commit",
+                     n_pos2);
+        end
+        $display("  A6 layer 3 of 3: overflow %b, layer 0 intact, n_pos %0d",
+                 ovf2, n_pos2);
 
         if (errors == 0) $display("ALL TESTS PASSED");
         else             $display("FAILED with %0d errors", errors);

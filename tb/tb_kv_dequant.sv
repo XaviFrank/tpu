@@ -117,9 +117,9 @@ module tb_kv_dequant;
         .clk(clk), .rst_n(rst_n), .in_valid(yv0), .in_data(yd0), .busy(),
         .w_valid(wv0), .w_idx(wi0), .w_data(wd0), .done(qd0));
     kv_cache_store #(.WORDS_PER_VEC(13), .MAX_POS(2)) c0 (
-        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_valid(wv0), .w_idx(wi0),
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_layer(1'b0), .w_valid(wv0), .w_idx(wi0),
         .w_data(wd0), .commit(qd0), .n_pos(np0), .full(), .overflow(ov0),
-        .rd_en(rba0), .rd_pos(2'd0), .rd_widx(rbc0), .rd_data(cr0));
+        .rd_en(rba0), .rd_layer(1'b0), .rd_pos(2'd0), .rd_widx(rbc0), .rd_data(cr0));
     kv_dequant #(.N(N), .QBITS(3), .QJL_EN(0), .ROT_MODE(0),
                  .INV_MUL(8388608), .INV_SHIFT(30),
                  .CB_PATH("rtl/kv_cb_m0_b3.memh")) d0 (
@@ -135,9 +135,9 @@ module tb_kv_dequant;
         .clk(clk), .rst_n(rst_n), .in_valid(yv1), .in_data(yd1), .busy(),
         .w_valid(wv1), .w_idx(wi1), .w_data(wd1), .done(qd1));
     kv_cache_store #(.WORDS_PER_VEC(14), .MAX_POS(2)) c1 (
-        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_valid(wv1), .w_idx(wi1),
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_layer(1'b0), .w_valid(wv1), .w_idx(wi1),
         .w_data(wd1), .commit(qd1), .n_pos(np1), .full(), .overflow(ov1),
-        .rd_en(rba1), .rd_pos(2'd0), .rd_widx(rbc1), .rd_data(cr1));
+        .rd_en(rba1), .rd_layer(1'b0), .rd_pos(2'd0), .rd_widx(rbc1), .rd_data(cr1));
     kv_dequant #(.N(N), .QBITS(2), .QJL_EN(1), .ROT_MODE(0),
                  .INV_MUL(8388608), .INV_SHIFT(30),
                  .CB_PATH("rtl/kv_cb_m0_b2.memh")) d1 (
@@ -153,9 +153,9 @@ module tb_kv_dequant;
         .clk(clk), .rst_n(rst_n), .in_valid(yv2), .in_data(yd2), .busy(),
         .w_valid(wv2), .w_idx(wi2), .w_data(wd2), .done(qd2));
     kv_cache_store #(.WORDS_PER_VEC(13), .MAX_POS(2)) c2 (
-        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_valid(wv2), .w_idx(wi2),
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_layer(1'b0), .w_valid(wv2), .w_idx(wi2),
         .w_data(wd2), .commit(qd2), .n_pos(np2), .full(), .overflow(ov2),
-        .rd_en(rba2), .rd_pos(2'd0), .rd_widx(rbc2), .rd_data(cr2));
+        .rd_en(rba2), .rd_layer(1'b0), .rd_pos(2'd0), .rd_widx(rbc2), .rd_data(cr2));
     kv_dequant #(.N(N), .QBITS(3), .QJL_EN(0), .ROT_MODE(1),
                  .INV_MUL(9680), .INV_SHIFT(30),
                  .CB_PATH("rtl/kv_cb_m1_b3.memh")) d2 (
@@ -171,9 +171,9 @@ module tb_kv_dequant;
         .clk(clk), .rst_n(rst_n), .in_valid(yv3), .in_data(yd3), .busy(),
         .w_valid(wv3), .w_idx(wi3), .w_data(wd3), .done(qd3));
     kv_cache_store #(.WORDS_PER_VEC(14), .MAX_POS(2)) c3 (
-        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_valid(wv3), .w_idx(wi3),
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_layer(1'b0), .w_valid(wv3), .w_idx(wi3),
         .w_data(wd3), .commit(qd3), .n_pos(np3), .full(), .overflow(ov3),
-        .rd_en(rba3), .rd_pos(2'd0), .rd_widx(rbc3), .rd_data(cr3));
+        .rd_en(rba3), .rd_layer(1'b0), .rd_pos(2'd0), .rd_widx(rbc3), .rd_data(cr3));
     kv_dequant #(.N(N), .QBITS(2), .QJL_EN(1), .ROT_MODE(1),
                  .INV_MUL(9680), .INV_SHIFT(30),
                  .CB_PATH("rtl/kv_cb_m1_b2.memh")) d3 (

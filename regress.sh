@@ -142,6 +142,13 @@ run_tb tb_attn_kv_top    rtl/kv_pack_int8.sv rtl/kv_rotate.sv \
                          rtl/attn_scan_gqa.sv rtl/attn_kv_top.sv \
                          tb/tb_attn_kv_top.sv
 
+# --- layer-offset addressing: two layers, one shared cache ---
+run_tb tb_attn_kv_layers rtl/kv_pack_int8.sv rtl/kv_rotate.sv \
+                         rtl/kv_quantize.sv rtl/kv_cache_store.sv \
+                         rtl/kv_unpack.sv rtl/attn_scan.sv \
+                         rtl/attn_scan_gqa.sv rtl/attn_kv_top.sv \
+                         tb/tb_attn_kv_layers.sv
+
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \

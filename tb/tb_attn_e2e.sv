@@ -92,16 +92,18 @@ module tb_attn_e2e;
     logic [31:0] krd_d, vrd_d;
 
     kv_cache_store #(.WORDS_PER_VEC(NWK), .MAX_POS(T)) u_kstore (
-        .clk(clk), .rst_n(rst_n), .clear(1'b0),
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_layer(1'b0),
         .w_valid(kp_wv), .w_idx(kp_wi), .w_data(kp_wd), .commit(kp_done),
         .n_pos(kn_pos), .full(k_full), .overflow(k_ovf),
-        .rd_en(krd_en), .rd_pos(krd_pos), .rd_widx(krd_wi), .rd_data(krd_d));
+        .rd_en(krd_en), .rd_layer(1'b0),
+        .rd_pos(krd_pos), .rd_widx(krd_wi), .rd_data(krd_d));
 
     kv_cache_store #(.WORDS_PER_VEC(NWV), .MAX_POS(T)) u_vstore (
-        .clk(clk), .rst_n(rst_n), .clear(1'b0),
+        .clk(clk), .rst_n(rst_n), .clear(1'b0), .w_layer(1'b0),
         .w_valid(vq_wv), .w_idx(vq_wi), .w_data(vq_wd), .commit(vq_done),
         .n_pos(vn_pos), .full(v_full), .overflow(v_ovf),
-        .rd_en(vrd_en), .rd_pos(vrd_pos), .rd_widx(vrd_wi), .rd_data(vrd_d));
+        .rd_en(vrd_en), .rd_layer(1'b0),
+        .rd_pos(vrd_pos), .rd_widx(vrd_wi), .rd_data(vrd_d));
 
     // ---------------- read path ----------------
     logic q_wr, prep_start, prep_done, pos_last, s_busy, pos_done;

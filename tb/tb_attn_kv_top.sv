@@ -22,6 +22,14 @@
 //   1-position result differs from the 102-position golden. Without
 //   it, a sequencer that silently scanned all 102 positions every time
 //   would also pass C2.
+//
+//   THE WHOLE SWEEP RUNS ON LAYER 1, NOT LAYER 0. The layer offset is
+//   the one piece of addressing that a layer-0-only test cannot reach:
+//   L*LSTRIDE is zero there, so a broken offset is invisible. Running
+//   the strongest golden available at a non-zero layer costs nothing
+//   and makes the offset load-bearing for a bit-exact result.
+//   tb_attn_kv_layers covers the complementary question - whether two
+//   layers interfere.
 //====================================================================
 module tb_attn_kv_top;
 
@@ -60,8 +68,11 @@ module tb_attn_kv_top;
     logic [47:0]        l_out;
     logic signed [15:0] m_out;
 
-    attn_kv_top #(.N(N), .NQ(NQ), .MAX_POS(T), .SSHIFT(0)) dut (
-        .clk(clk), .rst_n(rst_n), .clear(clear),
+    logic layer;
+
+    attn_kv_top #(.N(N), .NQ(NQ), .MAX_POS(T), .NUM_LAYERS(2),
+                  .SSHIFT(0)) dut (
+        .clk(clk), .rst_n(rst_n), .clear(clear), .layer(layer),
         .xk_wr(xk_wr), .xk_addr(xk_addr), .xk_data(xk_data),
         .xv_wr(xv_wr), .xv_addr(xv_addr), .xv_data(xv_data),
         .q_wr(q_wr), .q_head(q_head), .q_addr(q_addr), .q_data(q_data),
@@ -119,10 +130,12 @@ module tb_attn_kv_top;
         xk_addr = 0; xv_addr = 0; xk_data = 0; xv_data = 0;
         q_head = 0; q_addr = 0; q_data = 0;
         o_rd_head = 0; o_rd_addr = 0;
+        layer = 1'b1;                 // deliberately NOT layer 0
         repeat (4) @(negedge clk);
         rst_n = 1'b1;
         repeat (2) @(negedge clk);
-        $display("=== attn_kv_top: %0d sequential go/done invocations ===", T);
+        $display("=== attn_kv_top: %0d sequential go/done invocations, layer %0d ===",
+                 T, layer);
 
         for (t = 0; t < T; t = t + 1) begin
             load_token(t);
