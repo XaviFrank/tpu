@@ -163,6 +163,14 @@ once per cache entry instead of once per (entry, Q-head).
 
 ## §3 — Compute sizing: the inner loop needs **zero multipliers**
 
+> **SUPERSEDED IN PART — see §5.** The K half of this section predates
+> the end-to-end study that moved K from 2-bit to INT8; at 8 bits the K
+> inner loop is a real per-coordinate MAC and the mux argument does not
+> apply. The V half is still sound as *analysis* but was **never
+> implemented**: `attn_scan.sv` multiplies per coordinate on the V side
+> too. §5 has the measured site inventory, the LANES cost model, and
+> the decision.
+
 The budget says ~16 coordinates/cycle. The interesting result is what
 those 16 lanes have to contain.
 
@@ -244,3 +252,111 @@ all — it wants the raw 2/3-bit **indices** plus the per-entry scalars
 (`vnorm`, `rnorm`, sign bits), because the level lookup is folded into
 the precomputed products. So `kv_unpack`'s streaming output is indices,
 and the level rescale stays in `kv_dequant` for the verification path.
+
+---
+
+## §5 — The V-side level precompute: measured, costed, **not implemented**
+
+Added after the first synthesis run of `attn_scan_gqa` returned **20
+DSP48E2** at `NQ=2, LANES=1`. §3 above predicted "~8–12 DSPs total, and
+if synthesis reports DSPs proportional to lane count, the
+level-precompute factoring did not happen." Both halves of that
+sentence need correcting, and the correction goes in opposite
+directions.
+
+### What §3 got wrong
+
+**§3's K analysis is obsolete, not incorrect.** It was written when K
+was 2-bit, where a 4:1 mux over `P[i][k] = yQ[i]·lev_q15[k]` really did
+remove the multiplier. The end-to-end study moved K to INT8 (top-1
+53.3% → 91.2%), and 256 levels per coordinate cannot be muxed. `kprod =
+yq_i * k_s` is a genuine per-coordinate MAC and always will be. That is
+a consequence of a measured accuracy decision, not a regression.
+
+**§3's V analysis was never implemented.** `attn_scan.sv` computes
+`pv = cw_s * lv_sel` inside `S_VACC`, once per coordinate. The 8:1 mux
+over per-position precomputed products exists in the design note and in
+the module header; it does not exist in the RTL. The header's claim
+that "V stays 3-bit and stays mux-based, so the V loop is still
+multiplier-free" is false as built, and is corrected in place.
+
+### The actual site inventory
+
+Four multiplies per `attn_scan` instance, by declared operand width:
+
+| site | line | operands | scope | ~DSP48E2 (27×18) |
+|---|---|---|---|---|
+| `kprod = yq_i * k_s`   | 232 | 32 × 9 signed   | **per coordinate** | 2 |
+| `eterm = ediff*ffrac`  | 297 | 18 × 8 signed   | per position | 1 |
+| `cw = w_q * v_vnorm`   | 322 | 32 × 30 unsigned| per position | 4 |
+| `pv = cw_s * lv_sel`   | 327 | 48 × 16 signed  | **per coordinate** | 2 |
+
+Predicted 9/instance, 18 at `NQ=2`; measured **20**. The 2-DSP residual
+is most likely conservative operand splitting on `cw` or `pv` and is
+**not attributed** — settling it needs the hierarchical cell report,
+which should split 10/10 across `gen_q[0].u` and `gen_q[1].u`.
+
+Note `yq` is **32 bits**, not 8. The INT8 conversion widened it to hold
+the larger folded gain once the `1/N` from the rotation went away. "K's
+8×8 MAC" is a statement about the *format*; the *datapath* is 32×9.
+
+### The tradeoff, and why LANES=1 changes the answer
+
+Only the two per-coordinate sites replicate with lane count:
+
+```
+  as built          per instance = 4·LANES + 5      NQ=2:  8·LANES + 10
+  with §3 precompute per instance = 2·LANES + 7     NQ=2:  4·LANES + 14
+```
+
+|            | LANES=1 | LANES=2 | LANES=4 | LANES=16 |
+|---|---|---|---|---|
+| as built, NQ=2       | 18 | 26 | 42 | **138** |
+| §3 precompute, NQ=2  | 18 | 22 | 30 | **78**  |
+
+**At LANES=1 the precompute saves exactly zero DSPs.** This is the part
+the earlier "~154 vs ~80" framing obscured: those are LANES=16 numbers.
+At one lane there is exactly one `pv` multiplier in the RTL, and it is
+already time-shared across all 128 coordinates. The precompute replaces
+128 uses of one multiplier with 8 uses of one multiplier — the *same
+one multiplier*. It is a **time-multiplexing** optimization, and time
+multiplexing only pays when the thing being multiplexed is replicated.
+
+What it would cost at LANES=1, for that zero gain:
+
+- 8 × 48-bit product registers (~384 FF)
+- an 8:1 48-bit mux (~150 LUT)
+- 8 extra cycles per position between `S_WEIGHT` and `S_VACC` — a **+6%
+  per-position latency** on the 128-cycle V pass
+- one more state in a verified sequencer
+
+Strictly worse on every axis. Crossover is **LANES=2**.
+
+### Decision
+
+**Keep the per-coordinate multiply. Do not implement the precompute
+now.** Revisit it as a *precondition* of raising LANES, not as an
+independent optimization — at LANES=16 it is worth 60 DSPs across the
+head pair, which is the difference between fitting alongside the 288-DSP
+WS array and not.
+
+When it is implemented, the serial 8-cycle form is wrong at high lane
+counts for a throughput reason that is easy to miss: at LANES=16 the V
+pass is only 8 cycles, so a serial precompute **doubles** it, and the
+per-position budget (15.5 cycles/entry) is already tight. Use 4
+multipliers × 2 cycles (8 DSPs, +2 cycles) rather than 1 × 8.
+
+**No interface change.** `attn_scan`'s port list and timing contract are
+untouched by this decision, so anything building against them is safe.
+
+### A second, larger saving — also declined, for a different reason
+
+`cw = w_q * v_vnorm` is 4 DSPs and the single biggest consumer per
+instance at LANES=1. `w_q` is `eval15 << GUARD >> nsh`: only 16 bits of
+mantissa plus a variable shift. Multiplying `eval15` (16b) by `v_vnorm`
+(30b) *before* the shift is 2 DSPs instead of 4 — but it reorders
+truncation, so it is **not bit-exact** and would invalidate every golden
+in `tb_attn_scan`, `tb_attn_scan_gqa` and `tb_attn_e2e` plus the
+accuracy study behind the format choice. Declined as a numerics change
+masquerading as an area optimization. Recorded so it is not
+rediscovered as free.

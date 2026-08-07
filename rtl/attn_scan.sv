@@ -42,19 +42,38 @@
 //   assuming the average.
 //
 //====================================================================
-// K IS NOW INT8, SO THE K INNER LOOP HAS A REAL MULTIPLIER
-//   The earlier "no multiplier in either inner loop" result depended
-//   on K being 2-bit: a 4:1 mux over products precomputed once per
-//   head. The end-to-end study moved K to INT8 (top-1 53.3% -> 91.2%),
-//   and at 8 bits there are 256 values per coordinate, so the K side
-//   is a genuine signed MAC - about LANES DSPs. V stays 3-bit and
-//   stays mux-based, so the V loop is still multiplier-free.
+// BOTH INNER LOOPS MULTIPLY PER COORDINATE. This is deliberate at
+// LANES=1 and must change before LANES rises - see §5 of
+// docs/attention_read_design_notes.md.
+//
+//   K: the earlier "no multiplier in either inner loop" result
+//   depended on K being 2-bit - a 4:1 mux over products precomputed
+//   once per head. The end-to-end study moved K to INT8 (top-1 53.3%
+//   -> 91.2%) and 256 levels per coordinate cannot be muxed, so kprod
+//   is a genuine signed MAC. Permanent, and the price of an accuracy
+//   decision that was measured.
+//
+//   V: the 8:1 mux over per-position products IS still possible at 3
+//   bits, and this module does NOT do it - pv multiplies per
+//   coordinate. That is not an oversight left uncosted: at LANES=1 the
+//   precompute saves ZERO DSPs, because the single pv multiplier is
+//   already time-shared across all 128 coordinates and the precompute
+//   would time-share the same one multiplier across 8. It costs 384 FF,
+//   ~150 LUT, a state, and +6% per-position latency for that nothing.
+//   Crossover is LANES=2; at LANES=16 it is worth 60 DSPs across the
+//   head pair, so it is a PRECONDITION of widening, not an independent
+//   optimization.
+//
+//   Measured: 20 DSP48E2 for attn_scan_gqa at NQ=2, LANES=1, against
+//   4*LANES+5 = 9 predicted per instance. Four multiply sites per
+//   instance: kprod (32x9, per coord), eterm (18x8, per position),
+//   cw (32x30, per position), pv (48x16, per coord).
 //
 //   K is also no longer rotated, which removes work rather than adding
 //   it: no query rotation, no pk precompute, no per-vector norm, no
 //   QJL term. The score is simply sum_i yq[i]*k[i].
 //
-// (historical, for the V path)
+// (historical - the factoring that WAS designed and is NOT built)
 //   Position-dependent scales factor OUT of the coordinate sum, and
 //   what remains is position-INDEPENDENT, so both dot products become
 //   selection networks over precomputed products:
@@ -69,8 +88,9 @@
 //   So the whole scan is muxes and adders; multiplies happen ~11 times
 //   per POSITION, never per coordinate.
 //
-//   If synthesis reports DSPs scaling with LANES, that factoring did
-//   not happen and something reintroduced a per-coordinate multiply.
+//   Synthesis DOES report DSPs scaling with LANES, and that is the
+//   expected result for this build, not a symptom - see the block
+//   above. The check is quantitative now: 4*LANES+5 per instance.
 //
 //====================================================================
 // LANES = 1 IN THIS STEP, AND THAT IS A KNOWN THROUGHPUT GAP
@@ -211,12 +231,12 @@ module attn_scan #(
     end
 
     //----------------------------------------------------------------
-    // S_PREP: pk[i][k] = yq[i] * levK[k]. Four multiplies per cycle,
-    // N cycles, once per head. This is what makes the scan's inner
-    // loop multiplier-free.
+    // S_PREP: N cycles. With K at INT8 there is no pk table left to
+    // build, so the pass now only zeroes o[] (see the accumulator
+    // block below, which shares this state).
     //----------------------------------------------------------------
     //----------------------------------------------------------------
-    // S_KDOT: the selection network. One 4:1 mux and two adders.
+    // S_KDOT: one signed MAC and one accumulate, per coordinate.
     //----------------------------------------------------------------
     logic [AW-1:0]      ci;
     logic [7:0]         kraw;
@@ -305,7 +325,10 @@ module attn_scan #(
     end
 
     //----------------------------------------------------------------
-    // S_VACC: eight products per position, then an 8:1 mux per coord.
+    // S_VACC: cw is per position; pv is per COORDINATE. The designed
+    // form was 8 products per position plus an 8:1 mux - not built,
+    // and costed in the header block. Do not "fix" this without
+    // reading it: at LANES=1 the mux form is strictly worse.
     //----------------------------------------------------------------
     logic [63:0]          cw;
     logic signed [63:0]   cw_s;
