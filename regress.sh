@@ -135,6 +135,13 @@ run_tb tb_attn_scan_gqa  rtl/kv_unpack.sv rtl/attn_scan.sv rtl/attn_scan_gqa.sv 
 # --- KV write path + attention read path, assembled end to end ---
 run_tb tb_attn_e2e       rtl/kv_pack_int8.sv rtl/kv_rotate.sv                          rtl/kv_quantize.sv rtl/kv_cache_store.sv                          rtl/kv_unpack.sv rtl/attn_scan.sv                          rtl/attn_scan_gqa.sv tb/tb_attn_e2e.sv
 
+# --- the whole attention unit as one synthesizable top, repeated go ---
+run_tb tb_attn_kv_top    rtl/kv_pack_int8.sv rtl/kv_rotate.sv \
+                         rtl/kv_quantize.sv rtl/kv_cache_store.sv \
+                         rtl/kv_unpack.sv rtl/attn_scan.sv \
+                         rtl/attn_scan_gqa.sv rtl/attn_kv_top.sv \
+                         tb/tb_attn_kv_top.sv
+
 # --- build guard: the DEBUG_CAPTURE=0 (area reclaimed) configuration ---
 run_tb tb_debug_capture_off rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
                          rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
