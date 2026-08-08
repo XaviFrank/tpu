@@ -106,6 +106,16 @@ run_tb tb_axi_stream_to_buf_adapter rtl/tile_buffer.sv \
                          rtl/axi_stream_to_buf_adapter.sv \
                          tb/tb_axi_stream_to_buf_adapter.sv
 
+# --- DMA delivery path: adapter -> ws_tpu_top, buf_ready = !core_busy ---
+run_tb tb_dma_weight_load rtl/ws_pe.sv rtl/ws_array.sv rtl/input_skew.sv \
+                         rtl/tile_buffer.sv rtl/ws_controller.sv rtl/ws_unit.sv \
+                         rtl/perf_counters.sv rtl/ws_perf_counters.sv \
+                         rtl/requant.sv rtl/ws_quant_unit.sv \
+                         rtl/sync_2ff.sv rtl/pulse_sync.sv rtl/bus_handshake.sv \
+                         rtl/axi_lite_ctrl.sv rtl/ws_result_capture.sv \
+                         rtl/ws_tpu_top.sv rtl/axi_stream_to_buf_adapter.sv \
+                         tb/tb_dma_weight_load.sv
+
 # --- RMSNorm (first non-matmul unit) ---
 run_tb tb_rmsnorm        rtl/requant.sv rtl/rmsnorm.sv tb/tb_rmsnorm.sv
 

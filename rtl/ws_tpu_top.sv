@@ -71,6 +71,23 @@ module ws_tpu_top #(
     input  logic                          core_clk,
     input  logic                          core_rst_n,
 
+    // Core-domain busy, exported for the DMA path's backpressure.
+    //
+    // This is the SAME core_busy that feeds STATUS[0], but taken
+    // BEFORE the sync_2ff into the AXI domain - because its consumer,
+    // axi_stream_to_buf_adapter.buf_ready, runs on core_clk (pl_clk1
+    // in the block design, the same clock this module's core_clk
+    // takes). Routing it through the AXI domain and back would add a
+    // synchronizer's uncertainty to a same-domain signal and make the
+    // backpressure LATE, which is exactly the window that has to be
+    // closed. STATUS[0] keeps its synchronizer; the host still polls
+    // that, and this port is not a host-visible interface.
+    //
+    // Intended block-design wiring: invert this into the adapter's
+    // buf_ready, replacing ilconstant_0. See the DMA contract note in
+    // axi_stream_to_buf_adapter.sv.
+    output logic                          core_busy_out,
+
     // raw buffer write ports (future DMA/AXI-HP path)
     input  logic                          wr_en_w,
     input  logic [$clog2(DEPTH)-1:0]      wr_addr_w,
@@ -124,6 +141,7 @@ module ws_tpu_top #(
     // dut.core_go / dut.core_n_vecs - do not rename.
     //----------------------------------------------------------------
     logic                          core_go, core_busy;
+    assign core_busy_out = core_busy;
     logic [VEC_W-1:0]              core_n_vecs;
     logic                          core_relu_en;
     logic signed [SCALE_WIDTH-1:0] core_scale_mult;

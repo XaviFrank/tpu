@@ -52,11 +52,26 @@
 //   - buf_ready IS THE BACKPRESSURE SOURCE, and the integrator must
 //     supply it. tile_buffer's write port has no ready of its own -
 //     it accepts a write every cycle unconditionally - but its
-//     contract is that a tile is never read while being written. So
-//     drive buf_ready with something like !busy, to hold the stream
-//     off while the core is mid-run. Tying it to 1 is legal and will
-//     stream at full rate, but then nothing prevents a transfer from
-//     landing underneath a run.
+//     contract is that a tile is never read while being written.
+//
+//     RESOLVED: drive it from !ws_tpu_top.core_busy_out. That port
+//     was added for exactly this and is taken in the CORE domain,
+//     before STATUS[0]'s synchronizer, because this adapter runs on
+//     the same clock (pl_clk1) - a synchronizer here would make the
+//     backpressure late, which is the window being closed. The
+//     original block design tied buf_ready to an xlconstant(1);
+//     tb_dma_weight_load is the simulation of the corrected wiring.
+//
+//     WHAT !busy DOES AND DOES NOT BUY. It stops beats landing
+//     underneath a run that is ALREADY going. It does NOT stop a run
+//     from STARTING mid-transfer - go is a host write, and if the
+//     host issues it while beats are still in flight the core reads a
+//     half-written tile and returns a confidently wrong answer. That
+//     direction stays a HOST contract (wait for the DMA's idle bit
+//     before writing go), exactly as poke's contract is to poll
+//     poke_busy before go. Closing it in hardware needs a
+//     transfer-in-flight signal gating go, which is a controller
+//     change and deliberately not here.
 //   - NO BEAT IS DROPPED under backpressure, by construction: a beat
 //     is consumed only when tvalid && tready, and wr_en asserts only
 //     on that same condition. tready is independent of tvalid (legal
