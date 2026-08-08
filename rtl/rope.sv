@@ -106,7 +106,32 @@ module rope #(
     output logic                   rot_valid,
     output logic [$clog2(NF)-1:0]  rot_idx,
     output logic signed [7:0]      rot_x1,
-    output logic signed [7:0]      rot_x2
+    output logic signed [7:0]      rot_x2,
+
+    // ---- completion ----
+    // busy IS NOT A SAFE COMPLETION SIGNAL and these are not sugar.
+    // Two separate hazards:
+    //
+    //   1. busy does not RISE until the cycle after start/seek/
+    //      rot_start is sampled, so "assert rot_start; wait !busy"
+    //      reads the gap as already-done and falls straight through.
+    //      That is the trap attn_kv_top's T_WWAIT had to be written
+    //      around by hand.
+    //   2. worse, on the ROTATE path busy falls one cycle EARLY.
+    //      rot_valid is (state == S_ROT) delayed twice, so the last
+    //      of the NF beats lands one cycle after the FSM has already
+    //      returned to S_IDLE. A caller that waits for !busy and then
+    //      stops reading loses the final (x1, x2) pair - silently,
+    //      and only on the last frequency index.
+    //
+    // Both pulse in the cycle the FSM is back in S_IDLE, i.e. after
+    // every beat has landed and the module will accept a new command.
+    // rot_done comes from S_RTAIL, not S_TAIL: S_TAIL is the PHASE
+    // step's drain state on the other branch of the FSM, and a
+    // rot_done wired to it would pulse on start/seek and never on
+    // rot_start.
+    output logic                   step_done,
+    output logic                   rot_done
 );
 
     localparam int FW    = $clog2(NF);
@@ -182,6 +207,16 @@ module rope #(
     end
 
     assign busy = (state != S_IDLE);
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            step_done <= 1'b0;
+            rot_done  <= 1'b0;
+        end else begin
+            step_done <= (state == S_TAIL);
+            rot_done  <= (state == S_RTAIL);
+        end
+    end
 
     //----------------------------------------------------------------
     // Phase update. Accumulate is exact integer addition; seek is one

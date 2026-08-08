@@ -47,6 +47,7 @@ module tb_rope;
     logic                    rot_start, rot_valid, x_rd_en;
     logic [5:0]              x_rd_addr, rot_idx;
     logic signed [7:0]       x1_rd_data, x2_rd_data, rot_x1, rot_x2;
+    logic                    step_done, rot_done;
 
     rope #(.NF(NF), .PHASE_W(PHASE_W), .SIN_N(4096), .SIN_W(SIN_W)) dut (
         .clk (clk), .rst_n (rst_n),
@@ -56,8 +57,47 @@ module tb_rope;
         .rot_start (rot_start), .x_rd_en (x_rd_en), .x_rd_addr (x_rd_addr),
         .x1_rd_data (x1_rd_data), .x2_rd_data (x2_rd_data),
         .rot_valid (rot_valid), .rot_idx (rot_idx),
-        .rot_x1 (rot_x1), .rot_x2 (rot_x2)
+        .rot_x1 (rot_x1), .rot_x2 (rot_x2),
+        .step_done (step_done), .rot_done (rot_done)
     );
+
+    //----------------------------------------------------------------
+    // R4: completion-pulse timing.
+    //
+    // Free-running monitors rather than checks inside the run_* tasks,
+    // so EVERY command this testbench issues is covered - the rotate
+    // cases, the step cases, the seek cases - instead of only the ones
+    // an R4-specific task would issue itself.
+    //----------------------------------------------------------------
+    int   rot_calls, step_calls;      // commands accepted
+    int   sd_count, rd_count;         // pulses seen
+    int   rv_at_rot_done;             // rot_done coincided with a beat
+    int   rv_after_rot_done;          // beats AFTER the pulse - must be 0
+    int   rd_while_busy;              // pulse must land with the FSM idle
+    int   busy_early;                 // !busy while rot_valid still high
+
+    always @(posedge clk) if (rst_n) begin
+        // a command is accepted only when the FSM is actually idle
+        if (rot_start && !busy)            rot_calls  <= rot_calls + 1;
+        if ((start || seek) && !busy && !rot_start)
+                                           step_calls <= step_calls + 1;
+        if (step_done)                     sd_count   <= sd_count + 1;
+        if (rot_done) begin
+            rd_count <= rd_count + 1;
+            if (rot_valid) rv_at_rot_done <= rv_at_rot_done + 1;
+            if (busy)      rd_while_busy  <= rd_while_busy + 1;
+        end
+        if (rot_valid && !busy && !rot_done)
+            rv_after_rot_done <= rv_after_rot_done + 1;
+        if (rot_valid && !busy)
+            busy_early <= busy_early + 1;
+    end
+
+    initial begin
+        rot_calls = 0; step_calls = 0; sd_count = 0; rd_count = 0;
+        rv_at_rot_done = 0; rv_after_rot_done = 0;
+        rd_while_busy = 0; busy_early = 0;
+    end
 
     // capture one position's worth of cos/sin
     real got_c [NF];
@@ -357,6 +397,59 @@ module tb_rope;
                 $display("PASS [R3] K vector rotation: %0d/%0d exact, worst |diff| = %0d LSB",
                          exact, 2*NF, worst);
         end
+
+        repeat (4) @(negedge clk);
+
+        //-------------------------------------------------------------
+        // R4: the completion pulses, over every command issued above.
+        //-------------------------------------------------------------
+        if (rd_count != rot_calls) begin
+            errors++;
+            $error("[R4] rot_done fired %0d times for %0d rot_start(s)",
+                   rd_count, rot_calls);
+        end
+        if (sd_count != step_calls) begin
+            errors++;
+            $error("[R4] step_done fired %0d times for %0d start/seek(s)",
+                   sd_count, step_calls);
+        end
+        // not one EARLY: no beat may arrive after the pulse
+        if (rv_after_rot_done != 0) begin
+            errors++;
+            $error("[R4] %0d rot_valid beat(s) arrived after rot_done",
+                   rv_after_rot_done);
+        end
+        // not one LATE: it coincides with the final beat, every time
+        if (rv_at_rot_done != rot_calls) begin
+            errors++;
+            $error("[R4] rot_done coincided with the last beat %0d/%0d times",
+                   rv_at_rot_done, rot_calls);
+        end
+        // and it lands with the FSM already idle, so the next command
+        // can be issued on the very next cycle
+        if (rd_while_busy != 0) begin
+            errors++;
+            $error("[R4] rot_done asserted %0d time(s) while still busy",
+                   rd_while_busy);
+        end
+        if (rd_count == rot_calls && sd_count == step_calls
+            && rv_after_rot_done == 0 && rv_at_rot_done == rot_calls
+            && rd_while_busy == 0)
+            $display("PASS [R4] %0d rot_done / %0d step_done, each on the final beat, none late",
+                     rd_count, sd_count);
+
+        // WHY THE PULSE HAD TO EXIST. busy falls one cycle EARLY on the
+        // rotate path - rot_valid is (state == S_ROT) delayed twice, so
+        // the last beat lands after the FSM is already back in S_IDLE.
+        // This counter is nonzero BY DESIGN; if it ever reads zero the
+        // hazard is gone and the check above has stopped testing it.
+        if (busy_early != rot_calls) begin
+            errors++;
+            $error("[R4] expected busy to fall early on all %0d rotates, saw %0d",
+                   rot_calls, busy_early);
+        end else
+            $display("PASS [R4] busy falls 1 cycle before the last rot_valid on all %0d rotates - which is why !busy is not a completion signal",
+                     rot_calls);
 
         repeat (2) @(negedge clk);
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
