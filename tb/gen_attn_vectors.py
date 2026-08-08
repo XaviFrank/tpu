@@ -123,6 +123,25 @@ def model(yq, entries, tab, levV):
 MW, SW, POST_SHIFT = 15, 6, 8
 
 
+GW = 24
+
+
+def gain_ms(g):
+    """G as (mantissa, shift) for q_scale, normalized to GW bits.
+
+    Same mantissa+shift form recip emits and requant consumes. GW is
+    24 because that is the width at which the integer form reproduces
+    np.rint exactly on this data - 16 and 20 leave 2/128 coordinates
+    off by one LSB. See q_scale.sv's header.
+    """
+    gs = GW - 1 - int(math.floor(math.log2(g)))
+    gm = int(round(g * 2 ** gs))
+    if gm >= (1 << GW):
+        gs -= 1
+        gm = int(round(g * 2 ** gs))
+    return gm, gs
+
+
 def finalize(o, l, h_mat, d_vec):
     """The attn_finalize datapath, in integers, independently of the RTL.
 
@@ -212,6 +231,19 @@ def main():
         o, l, m, resc = model(yq, entries, tab, levV)
         assert resc > 0, "no rescale fired for head %d" % QHEADS[hi]
 
+        # q_scale's constants, plus the proof that the integer form
+        # is not merely close to the numpy reference but EQUAL to it -
+        # asserted here so a width change cannot quietly degrade the
+        # existing yq/o/l goldens.
+        gm, gs = gain_ms(G)
+        yq_hw = np.array([(int(v) * gm + (1 << (gs - 1))) >> gs for v in qq],
+                         dtype=np.int64)
+        assert np.array_equal(yq_hw, yq), (
+            "q_scale's GW=%d does not reproduce np.rint for head %d (%d of %d "
+            "differ)" % (GW, QHEADS[hi], int((yq_hw != yq).sum()), len(qq)))
+
+        w("attn_q8_%d.memh" % hi, qq, 8)
+        w("attn_qg%d.memh" % hi, [gm, gs], 32)
         w("attn_yq%d.memh" % hi, yq, 32)
         w("attn_o%d.memh" % hi, o, 48)
         w("attn_l%d.memh" % hi, [l], 48)

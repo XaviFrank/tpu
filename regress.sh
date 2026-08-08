@@ -125,6 +125,9 @@ run_tb tb_swiglu_gate    rtl/requant.sv rtl/swiglu_gate.sv tb/tb_swiglu_gate.sv
 # --- RoPE phase generation (accumulate + seek + cos/sin) ---
 run_tb tb_rope           rtl/rope.sv tb/tb_rope.sv
 
+# --- Q scaling: RoPE's INT8 -> attn_kv_top's pre-scaled 32-bit query ---
+run_tb tb_q_scale        rtl/q_scale.sv tb/tb_q_scale.sv
+
 # --- attention output finalization: 1/l as mantissa + shift ---
 run_tb tb_recip          rtl/recip.sv tb/tb_recip.sv
 
