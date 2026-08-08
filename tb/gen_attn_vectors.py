@@ -119,6 +119,43 @@ def model(yq, entries, tab, levV):
     return o, l, m, resc
 
 
+
+MW, SW, POST_SHIFT = 15, 6, 8
+
+
+def finalize(o, l, h_mat, d_vec):
+    """The attn_finalize datapath, in integers, independently of the RTL.
+
+    o/l is the rotated-domain output times 2**-15 (attn_scan accumulates
+    o at 2**16 and l at 2**31, and the V codebook levels are Q1.15). The
+    inverse rotation then leaves it N times too large. So the INT8
+    answer at V's own scale is
+
+        out = irot(o) * (1/l) * 2**15 / N
+            = irot(o) * mant >> (shift - POST_SHIFT)
+
+    with POST_SHIFT = 15 - log2(N) = 8, which is why the divide and the
+    divide-by-N both disappear into requant's existing shift and neither
+    needs hardware of its own.
+    """
+    e     = int(l).bit_length() - 1
+    shift = e + MW
+    mant  = min((1 << shift) // int(l), (1 << MW) - 1)
+    assert shift < (1 << SW), "shift %d does not fit SW=%d" % (shift, SW)
+
+    # exact integer inverse rotation: butterfly, then D. No divide by N.
+    r  = (h_mat @ np.array([int(x) for x in o], dtype=object)) * d_vec.astype(object)
+    sa = shift - POST_SHIFT
+    assert sa > 0
+    out = []
+    for x in r:
+        # requant: round-half-up then arithmetic shift then saturate.
+        # Python >> on a negative int floors, exactly as Verilog >>> does.
+        y = (int(x) * mant + (1 << (sa - 1))) >> sa
+        out.append(max(-128, min(127, y)))
+    return mant, shift, out
+
+
 def main():
     T, hd, qvs, kv, vv = real_row()
     h_mat = hadamard(N)
@@ -179,6 +216,11 @@ def main():
         w("attn_o%d.memh" % hi, o, 48)
         w("attn_l%d.memh" % hi, [l], 48)
 
+        # ---- attn_finalize's golden: 1/l, inverse rotation, requant --
+        mant, shift, fin = finalize(o, l, h_mat, d_vec)
+        w("attn_fin%d.memh" % hi, fin, 8)
+        w("attn_finms%d.memh" % hi, [mant, shift], 16)
+
         sc = (qq @ kq.T) * sq * sk / math.sqrt(hd)
         pr = np.exp(sc - sc.max()); pr /= pr.sum()
         ref_out = pr @ (vq * sv)
@@ -187,6 +229,14 @@ def main():
         rel = np.linalg.norm(got - ref_out) / np.linalg.norm(ref_out)
         print("  Q head %d: %d rescale(s), m %d, vs float %.2f dB"
               % (QHEADS[hi], resc, m, -20 * math.log10(rel)))
+
+        # The finalized INT8 against the same float reference, so the
+        # cost of the last three stages is stated rather than assumed.
+        fa  = np.array(fin, dtype=np.float64) * sv
+        frl = np.linalg.norm(fa - ref_out) / np.linalg.norm(ref_out)
+        print("    finalized INT8: mant %d shift %d, range [%d, %d], "
+              "vs float %.2f dB"
+              % (mant, shift, min(fin), max(fin), -20 * math.log10(frl)))
 
 
 if __name__ == "__main__":
