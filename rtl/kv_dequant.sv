@@ -80,13 +80,9 @@ module kv_dequant #(
     localparam int NWORDS = (QJL_EN != 0) ? (NWQ + 6) : (NWQ + 1);
     localparam int QB     = N * QBITS;
     localparam int ACC_W  = 48;
-    localparam int STAGES = AW;
-    localparam int HALF   = N / 2;
     localparam int ROOT_W = 30;
 
     localparam logic [AW:0]   N_LAST  = N - 1;
-    localparam logic [AW-1:0] ONE     = 1;
-    localparam logic [AW-1:0] IJ_LAST = N - 1;
     // round(32768/sqrt(N)); N=128 gives 2896.
     localparam int INV_SQRTN = 2896;
 
@@ -105,7 +101,6 @@ module kv_dequant #(
     logic               entry_valid, u_busy;
     logic [31:0]        lev_s [NLEV];
     logic [31:0]        amp;
-    logic [ACC_W-1:0]   mem [N];
     logic               calc_done;
     logic [ACC_W-1:0]   out_data;
 
@@ -249,132 +244,34 @@ module kv_dequant #(
 
     always_ff @(posedge clk) o_idx <= cnt[AW-1:0];
 
-    generate
-    if (ROT_MODE == 0) begin : gen_ihad
-        //------------------------------------------------------------
-        // Inverse randomized Hadamard: butterfly first, D afterwards.
-        //------------------------------------------------------------
-        (* rom_style = "distributed" *) logic [7:0] sign_rom [N];
-        initial $readmemh(ROT_SIGN_PATH, sign_rom);
+    //----------------------------------------------------------------
+    // The inverse rotation is kv_irotate's job, shared with the
+    // attention output path. `run` is literally the old
+    // `state == D_ROT`, and the read port is combinational with D
+    // already applied, so the scale-and-saturate below is unchanged.
+    //----------------------------------------------------------------
+    logic               rot_run;
+    logic [AW-1:0]      rot_rd_idx;
+    logic               rec_wr;
+    logic [ACC_W-1:0]   yhat_ext;
 
-        logic [2:0]       st;
-        logic [AW-2:0]    pr;
-        logic [AW-1:0]    pr_ext, mask_lo, idx_i, idx_j;
-        logic [ACC_W-1:0] a_val, b_val, raw;
+    assign rot_run    = (state == D_ROT);
+    assign rot_rd_idx = cnt[AW-1:0];
+    assign rec_wr     = (state == D_REC);
+    assign yhat_ext   = {{(ACC_W-32){yhat[31]}}, yhat};
 
-        localparam logic [AW-2:0] PR_LAST = HALF - 1;
-
-        assign pr_ext  = {1'b0, pr};
-        assign mask_lo = (ONE << st) - ONE;
-        assign idx_i   = ((pr_ext >> st) << (st + 1'b1)) | (pr_ext & mask_lo);
-        assign idx_j   = idx_i | (ONE << st);
-        assign a_val   = mem[idx_i];
-        assign b_val   = mem[idx_j];
-
-        always_ff @(posedge clk) begin
-            if (state == D_REC) begin
-                mem[ridx] <= {{(ACC_W-32){yhat[31]}}, yhat};
-            end else if (state == D_ROT) begin
-                mem[idx_i] <= a_val + b_val;
-                mem[idx_j] <= a_val - b_val;
-            end
-        end
-
-        always_ff @(posedge clk or negedge rst_n) begin
-            if (!rst_n) begin
-                st <= 3'd0;
-                pr <= '0;
-            end else if (state != D_ROT) begin
-                st <= 3'd0;
-                pr <= '0;
-            end else if (pr == PR_LAST) begin
-                pr <= '0;
-                st <= st + 3'd1;
-            end else begin
-                pr <= pr + 1'b1;
-            end
-        end
-
-        assign calc_done = (state == D_ROT) && (st == STAGES - 1)
-                                            && (pr == PR_LAST);
-        // D applied here, on the way out
-        assign raw      = mem[cnt[AW-1:0]];
-        assign out_data = sign_rom[cnt[AW-1:0]][0] ? (~raw + 1'b1) : raw;
-
-    end else begin : gen_idense
-        //------------------------------------------------------------
-        // Inverse dense: x = Pi^T y, i.e. address the ROM transposed.
-        //------------------------------------------------------------
-        (* rom_style = "block" *) logic [7:0] pi_rom [N*N];
-        initial $readmemh(ROT_PI_PATH, pi_rom);
-
-        logic [ACC_W-1:0]   ymem [N];
-        logic [AW-1:0]      oi, ij, oi_r, ij_r;
-        logic [7:0]         pi_q;
-        logic [ACC_W-1:0]   y_q;
-        logic signed [8:0]  pi_s;
-        logic signed [ACC_W+8:0] prod;
-        logic [ACC_W-1:0]   acc;
-        logic               mac_v, ctr_last, ctr_last_r;
-
-        always_ff @(posedge clk) begin
-            if (state == D_REC) ymem[ridx] <= {{(ACC_W-32){yhat[31]}}, yhat};
-        end
-
-        always_ff @(posedge clk or negedge rst_n) begin
-            if (!rst_n) begin
-                oi <= '0;
-                ij <= '0;
-            end else if (state != D_ROT) begin
-                oi <= '0;
-                ij <= '0;
-            end else if (ij == IJ_LAST) begin
-                ij <= '0;
-                oi <= oi + 1'b1;
-            end else begin
-                ij <= ij + 1'b1;
-            end
-        end
-
-        // {ij, oi} rather than {oi, ij}: that transposition IS the
-        // inverse rotation.
-        always_ff @(posedge clk) begin
-            pi_q <= pi_rom[{ij, oi}];
-            y_q  <= ymem[ij];
-            oi_r <= oi;
-            ij_r <= ij;
-        end
-
-        always_ff @(posedge clk or negedge rst_n) begin
-            if (!rst_n) mac_v <= 1'b0;
-            else        mac_v <= (state == D_ROT);
-        end
-
-        assign pi_s = {pi_q[7], pi_q};
-        assign prod = pi_s * $signed(y_q);
-
-        always_ff @(posedge clk) begin
-            if (!mac_v)               acc <= '0;
-            else if (ij_r == IJ_LAST) acc <= '0;
-            else                      acc <= acc + prod[ACC_W-1:0];
-        end
-
-        always_ff @(posedge clk) begin
-            if (mac_v && (ij_r == IJ_LAST))
-                mem[oi_r] <= acc + prod[ACC_W-1:0];
-        end
-
-        assign ctr_last = (state == D_ROT) && (oi == IJ_LAST)
-                                           && (ij == IJ_LAST);
-
-        always_ff @(posedge clk or negedge rst_n) begin
-            if (!rst_n) ctr_last_r <= 1'b0;
-            else        ctr_last_r <= ctr_last;
-        end
-
-        assign calc_done = ctr_last_r;
-        assign out_data  = mem[cnt[AW-1:0]];
-    end
-    endgenerate
+    kv_irotate #(.N(N), .DW(ACC_W), .ROT_MODE(ROT_MODE),
+                 .ROT_SIGN_PATH(ROT_SIGN_PATH),
+                 .ROT_PI_PATH(ROT_PI_PATH)) u_irot (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .in_valid  (rec_wr),
+        .in_idx    (ridx),
+        .in_data   (yhat_ext),
+        .run       (rot_run),
+        .calc_done (calc_done),
+        .rd_idx    (rot_rd_idx),
+        .rd_data   (out_data)
+    );
 
 endmodule

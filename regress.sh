@@ -125,6 +125,9 @@ run_tb tb_swiglu_gate    rtl/requant.sv rtl/swiglu_gate.sv tb/tb_swiglu_gate.sv
 # --- RoPE phase generation (accumulate + seek + cos/sin) ---
 run_tb tb_rope           rtl/rope.sv tb/tb_rope.sv
 
+# --- attention output finalization: 1/l as mantissa + shift ---
+run_tb tb_recip          rtl/recip.sv tb/tb_recip.sv
+
 # --- KV cache write path: rotation stage, both constructions ---
 run_tb tb_kv_rotate      rtl/kv_rotate.sv tb/tb_kv_rotate.sv
 run_tb tb_kv_quantize    rtl/kv_rotate.sv rtl/kv_quantize.sv tb/tb_kv_quantize.sv
@@ -132,7 +135,7 @@ run_tb tb_kv_cache_store rtl/kv_rotate.sv rtl/kv_quantize.sv \
                          rtl/kv_cache_store.sv tb/tb_kv_cache_store.sv
 run_tb tb_kv_dequant     rtl/kv_rotate.sv rtl/kv_quantize.sv \
                          rtl/kv_cache_store.sv rtl/kv_unpack.sv \
-                         rtl/kv_dequant.sv tb/tb_kv_dequant.sv
+                         rtl/kv_irotate.sv rtl/kv_dequant.sv tb/tb_kv_dequant.sv
 
 # --- KV write path: INT8 K line (K moved off low-bit after the
 # --- end-to-end study; V stays 3-bit) ---
