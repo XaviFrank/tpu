@@ -122,6 +122,9 @@ run_tb tb_rmsnorm        rtl/requant.sv rtl/rmsnorm.sv tb/tb_rmsnorm.sv
 # --- SwiGLU gate (SiLU + elementwise multiply + requant) ---
 run_tb tb_swiglu_gate    rtl/requant.sv rtl/swiglu_gate.sv tb/tb_swiglu_gate.sv
 
+# --- INT16 residual stream: rescale a stage output and add it back ---
+run_tb tb_residual_add   rtl/residual_add.sv tb/tb_residual_add.sv
+
 # --- RoPE phase generation (accumulate + seek + cos/sin) ---
 run_tb tb_rope           rtl/rope.sv tb/tb_rope.sv
 
