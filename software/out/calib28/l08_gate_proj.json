@@ -1,0 +1,292 @@
+{
+ "source": {
+  "repo": "Qwen/Qwen3-0.6B",
+  "tensor": "model.layers.8.mlp.gate_proj.weight",
+  "tensor_shape": [
+   3072,
+   1024
+  ],
+  "slice": {
+   "out_dims": [
+    0,
+    16
+   ],
+   "in_dims": [
+    0,
+    16
+   ],
+   "note": "one 16x16 tile of the real tensor; the bitstream is single-tile ws_tpu_top"
+  },
+  "activation": {
+   "definition": "post_attention_layernorm(hidden + attn_out)",
+   "source": "gate_proj",
+   "layer": 8,
+   "position": "last token of calibration sequence 0",
+   "token_id": 13,
+   "token_text": "."
+  }
+ },
+ "quantization": {
+  "scheme": "symmetric per-tensor int8, clip to +/-127",
+  "w_scale": 0.006489911417322834,
+  "w_absmax_full_tensor": 0.82421875,
+  "a_scale": 0.18246829415869525,
+  "a_absmax_calibration": 23.173473358154297,
+  "a_p999_calibration": 10.426434516906738,
+  "a_p9999_calibration": 18.5385684967041,
+  "a_scale_rule": "absmax over the calibration set - measured best on held-out text, see the header",
+  "calibration_sequences": 5,
+  "calibration_values": 104448,
+  "dequant_factor": 0.0011842030655599377,
+  "dequant_note": "float_result = int32_from_hardware * dequant_factor"
+ },
+ "layout": {
+  "rule": "buffer word i = row i (natural order); byte j = column j, byte 0 in bits[7:0]",
+  "transpose": "word i, byte j = W_pt[j][i]  (array computes y = W_loaded^T . a)",
+  "row_order_note": "ws_controller reads DESCENDING (load_row = K-1-load_cnt), so bottom-first feeding is the controller's doing - the packer must NOT reverse rows"
+ },
+ "weight_words": [
+  {
+   "addr": 0,
+   "hex": "0xf3060408f806fd0b08f908050517fb02",
+   "poke_lanes": [
+    85457666,
+    150538245,
+    4161207563,
+    4077257736
+   ]
+  },
+  {
+   "addr": 1,
+   "hex": "0x0",
+   "poke_lanes": [
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "addr": 2,
+   "hex": "0xf9fef60704fe050401fcfe01020203",
+   "poke_lanes": [
+    16908803,
+    67239166,
+    117767685,
+    16383734
+   ]
+  },
+  {
+   "addr": 3,
+   "hex": "0x70909090109fc030afb080a09f9f8fa",
+   "poke_lanes": [
+    167377146,
+    184223754,
+    17431555,
+    118032649
+   ]
+  },
+  {
+   "addr": 4,
+   "hex": "0xf0fbfd0103fffbfd0002fefdfa060103",
+   "poke_lanes": [
+    4194697475,
+    196349,
+    67107837,
+    4043046145
+   ]
+  },
+  {
+   "addr": 5,
+   "hex": "0xfdf9f9f9fef70200fb03f9fafafb0501",
+   "poke_lanes": [
+    4210754817,
+    4211341818,
+    4277600768,
+    4261018105
+   ]
+  },
+  {
+   "addr": 6,
+   "hex": "0xe8ff01fcfffe0201fc0200fd030901fe",
+   "poke_lanes": [
+    50921982,
+    4227989757,
+    4294836737,
+    3909026300
+   ]
+  },
+  {
+   "addr": 7,
+   "hex": "0xfb050606e80603fd06fa060706fefcfb",
+   "poke_lanes": [
+    117374203,
+    117048839,
+    3892708349,
+    4211410438
+   ]
+  },
+  {
+   "addr": 8,
+   "hex": "0xfbf8f8f8fef805f7f905f9f6fa140707",
+   "poke_lanes": [
+    4195616519,
+    4177918454,
+    4277667319,
+    4227397880
+   ]
+  },
+  {
+   "addr": 9,
+   "hex": "0xea010503f003fa0d03f803060102fb00",
+   "poke_lanes": [
+    16972544,
+    66585350,
+    4026792461,
+    3925935363
+   ]
+  },
+  {
+   "addr": 10,
+   "hex": "0xf8fefcfbf90208f6fd00fafefc070203",
+   "poke_lanes": [
+    4228317699,
+    4244699902,
+    4177660150,
+    4177460475
+   ]
+  },
+  {
+   "addr": 11,
+   "hex": "0xe5ff0302fe0200070203030203fc0002",
+   "poke_lanes": [
+    66846722,
+    33751810,
+    4261543943,
+    3858694914
+   ]
+  },
+  {
+   "addr": 12,
+   "hex": "0xf7fffdfde7ff06f5fff7fbfffdf3fffd",
+   "poke_lanes": [
+    4260626429,
+    4294441983,
+    3892250357,
+    4160749053
+   ]
+  },
+  {
+   "addr": 13,
+   "hex": "0x100",
+   "poke_lanes": [
+    256,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "addr": 14,
+   "hex": "0xf0faf9fa03fb02faf503f5f9f5f60400",
+   "poke_lanes": [
+    4126540800,
+    4110677497,
+    66781946,
+    4042979834
+   ]
+  },
+  {
+   "addr": 15,
+   "hex": "0x100105040801fb0f0503070b08f7fd00",
+   "poke_lanes": [
+    150469888,
+    84084491,
+    134347535,
+    268502276
+   ]
+  }
+ ],
+ "activation_words": [
+  {
+   "addr": 0,
+   "hex": "0xfe060002fff51211edfc07fee7020009",
+   "poke_lanes": [
+    3875667977,
+    3992717310,
+    4294251025,
+    4261806082
+   ]
+  }
+ ],
+ "expected": {
+  "golden_int32": [
+   356,
+   299,
+   576,
+   -465,
+   -474,
+   -387,
+   119,
+   -415,
+   189,
+   -49,
+   -470,
+   66,
+   -401,
+   -417,
+   -450,
+   -602
+  ],
+  "check": "hardware PEEK buf_sel=3 must equal golden_int32 EXACTLY - both sides are int32 arithmetic over identical int8 inputs, so this is a bit-exact comparison, not a tolerance",
+  "float_reference": [
+   0.40611865855855456,
+   0.36565311008195067,
+   0.7423203578377544,
+   -0.5377996907466507,
+   -0.5480841742947131,
+   -0.46145834779135786,
+   0.12553898117478068,
+   -0.4669062906799213,
+   0.22142572171677877,
+   -0.04061660618906959,
+   -0.5634840034515136,
+   0.08886656317286246,
+   -0.45464512960445325,
+   -0.4900223701765398,
+   -0.5314322406189653,
+   -0.7191048936046389
+  ],
+  "dequantized": [
+   0.4215762913393379,
+   0.3540767166024214,
+   0.6821009657625242,
+   -0.5506544254853711,
+   -0.5613122530754105,
+   -0.45828658637169595,
+   0.14092016480163258,
+   -0.4914442722073742,
+   0.22381437939082824,
+   -0.05802595021243695,
+   -0.5565754408131707,
+   0.0781574023269559,
+   -0.474865429289535,
+   -0.493812678338494,
+   -0.532891379501972,
+   -0.7128902454670826
+  ]
+ },
+ "error_analysis": {
+  "note": "quantization error lives in the FLOAT comparison only; the int32 check above is exact",
+  "abs_err_max": 0.060219392075230194,
+  "abs_err_mean": 0.01409545490488704,
+  "output_span_absmax": 0.7423203578377544,
+  "err_vs_span_max": 0.08112318548104816,
+  "k_covered_by_tile": 16,
+  "k_total": 1024,
+  "full_output_span_absmax": 3.6548724801583017,
+  "err_vs_full_output_span_max": 0.016476468714613522,
+  "int8_levels_used_by_slice": 27
+ },
+ "n_vecs": 1
+}

@@ -3,3 +3,13 @@ vivado/
 reports/
 software/qwen/
 software/__pycache__/
+
+# 750 MB of quantized weights and norms. Regenerate with
+#   python software/calibrate_all.py && python software/embed_lm_head.py
+# The JSON artifacts and index.json ARE tracked - they are ~1.3 MB and
+# carry every scale, so the binaries are reproducible from them plus the
+# model. Pattern is by EXTENSION, not by suffix: an earlier
+# "*_int8.npy" rule silently missed embed_lm_head_int8_per_tensor.npy
+# and would have staged 311 MB.
+software/out/calib28/*.npy
+software/out/calib28/*.npz

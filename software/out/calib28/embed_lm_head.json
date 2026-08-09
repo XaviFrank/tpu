@@ -1,0 +1,259 @@
+{
+ "source": {
+  "repo": "Qwen/Qwen3-0.6B",
+  "tensor": "model.embed_tokens.weight (== lm_head.weight, tied)",
+  "tensor_shape": [
+   151936,
+   1024
+  ],
+  "slice": {
+   "out_dims": [
+    0,
+    16
+   ],
+   "in_dims": [
+    0,
+    16
+   ],
+   "note": "one 16x16 tile of the real tensor; the bitstream is single-tile ws_tpu_top"
+  },
+  "roles": {
+   "embedding": "gather - row t is read whole and fed to input_layernorm; no dot product",
+   "lm_head": "matmul logits[j] = W[j,:] . h, so output channel j IS row j",
+   "note": "per-row scaling is the natural choice for the gather AND equals per-output-channel scaling for the matmul - one scale set serves both"
+  },
+  "activation": {
+   "definition": "model.norm(hidden) - the LM head's input",
+   "position": "last position of the evaluation text"
+  }
+ },
+ "quantization": {
+  "scheme": "symmetric int8; per-tensor scale shipped, per-row scales also emitted",
+  "w_scale": 0.0025067667322834645,
+  "w_absmax_full_tensor": 0.318359375,
+  "a_scale": 0.8568743007389579,
+  "a_absmax_calibration": 108.82303619384766,
+  "per_row_scales_npy": "embed_lm_head_row_scales.npy",
+  "per_row_scale_min": 0.0004402220656629652,
+  "per_row_scale_max": 0.002506766701117158,
+  "dequant_factor": 0.002147983990841076,
+  "dequant_note": "float_result = int32_from_hardware * dequant_factor",
+  "hardware_note": "REQUANT_CFG carries ONE scale for all N lanes, so this bitstream can only use w_scale; per_row would need per-lane scale registers"
+ },
+ "layout": {
+  "rule": "buffer word i = row i (natural order); byte j = column j, byte 0 in bits[7:0]",
+  "transpose": "word i, byte j = W_pt[j][i]  (array computes y = W_loaded^T . a)"
+ },
+ "weight_words": [
+  {
+   "addr": 0,
+   "hex": "0x3fa03f4f709fef3f205fffbff0b0dfc",
+   "poke_lanes": [
+    4278914556,
+    4060479483,
+    4144627443,
+    66716660
+   ]
+  },
+  {
+   "addr": 1,
+   "hex": "0x16111918130b0a0e090d0907050e090d",
+   "poke_lanes": [
+    84805901,
+    151849223,
+    319490574,
+    370219288
+   ]
+  },
+  {
+   "addr": 2,
+   "hex": "0xeaeae8e4e2f3ebeee6e8f5eff6f8e8e2",
+   "poke_lanes": [
+    4143507682,
+    3874026991,
+    3807636462,
+    3941263588
+   ]
+  },
+  {
+   "addr": 3,
+   "hex": "0xebfafbfefbfafdfcf7fefaf7fdf502f9",
+   "poke_lanes": [
+    4260692729,
+    4160682743,
+    4227530236,
+    3959094270
+   ]
+  },
+  {
+   "addr": 4,
+   "hex": "0xf303070b0b06010cfefd02ff10fb05fe",
+   "poke_lanes": [
+    284886526,
+    4277994239,
+    184942860,
+    4077061899
+   ]
+  },
+  {
+   "addr": 5,
+   "hex": "0x8fe04030601fa0209fbf5fc03f7effa",
+   "poke_lanes": [
+    66580474,
+    167507452,
+    100792834,
+    150864899
+   ]
+  },
+  {
+   "addr": 6,
+   "hex": "0x8f3e5ebf8fcf6fbf9ffff00fff6fff3",
+   "poke_lanes": [
+    4294377459,
+    4194303744,
+    4177327867,
+    150201835
+   ]
+  },
+  {
+   "addr": 7,
+   "hex": "0x803fb06f409070309060e0e0b0e0803",
+   "poke_lanes": [
+    185468931,
+    151391758,
+    4094232323,
+    134478598
+   ]
+  },
+  {
+   "addr": 8,
+   "hex": "0x5faf4f7fb09fb07fef9f3f8fff1def7",
+   "poke_lanes": [
+    4294041335,
+    4277793784,
+    4211735303,
+    100332791
+   ]
+  },
+  {
+   "addr": 9,
+   "hex": "0x30c0b15100d03fc15fb0c04050df210",
+   "poke_lanes": [
+    84800016,
+    368774148,
+    269288444,
+    51120917
+   ]
+  },
+  {
+   "addr": 10,
+   "hex": "0xefece8e3e8f1f3e0f0e9e3f5f5f4eff4",
+   "poke_lanes": [
+    4126470132,
+    4041860085,
+    3908170720,
+    4025280739
+   ]
+  },
+  {
+   "addr": 11,
+   "hex": "0x10007070bfcf9f704e500f506f2ef01",
+   "poke_lanes": [
+    116584193,
+    82116853,
+    201128439,
+    16779015
+   ]
+  },
+  {
+   "addr": 12,
+   "hex": "0x10110d140b0c08130c03fe050a090a0a",
+   "poke_lanes": [
+    168364554,
+    201588229,
+    185337875,
+    269552916
+   ]
+  },
+  {
+   "addr": 13,
+   "hex": "0xe9ece7e3e3f3edede1ecf6f6f7f5ede5",
+   "poke_lanes": [
+    4160089573,
+    3790403318,
+    3824414189,
+    3924617187
+   ]
+  },
+  {
+   "addr": 14,
+   "hex": "0xe6dee8e1e0e8eee8d9e5f1f5eeeeefd1",
+   "poke_lanes": [
+    4008636369,
+    3655725557,
+    3773361896,
+    3873368289
+   ]
+  },
+  {
+   "addr": 15,
+   "hex": "0x110e132113040e13060e01010b0c1905",
+   "poke_lanes": [
+    185342213,
+    101581057,
+    319032851,
+    286135073
+   ]
+  }
+ ],
+ "activation_words": [
+  {
+   "addr": 0,
+   "hex": "0x1fdff00fd0205f71007040103ff2ffb",
+   "poke_lanes": [
+    67055611,
+    268895233,
+    4244768247,
+    33423104
+   ]
+  }
+ ],
+ "expected": {
+  "golden_int32": [
+   878,
+   794,
+   986,
+   506,
+   698,
+   771,
+   858,
+   854,
+   752,
+   653,
+   648,
+   928,
+   1444,
+   1133,
+   995,
+   1232
+  ],
+  "check": "hardware PEEK buf_sel=3 must equal golden_int32 EXACTLY"
+ },
+ "error_analysis": {
+  "gather_rel_rms_per_tensor_mean": 0.02593286521732807,
+  "gather_rel_rms_per_tensor_worst_row": 0.07686322182416916,
+  "gather_rel_rms_per_row_mean": 0.008254025131464005,
+  "gather_rel_rms_per_row_worst_row": 0.02158745378255844,
+  "lm_head_positions_evaluated": 2010,
+  "lm_head_top1_per_tensor": 0.9203980099502488,
+  "lm_head_top1_per_row": 0.9263681592039801,
+  "lm_head_kl_per_tensor": 0.016170600429177284,
+  "lm_head_kl_per_row": 0.013709683902561665
+ },
+ "integration_note": {
+  "tiles_as_matmul": 607744,
+  "int8_bytes": 155582464,
+  "comment": "largest matmul in the model; having it quantized correctly is separate from integrating it"
+ },
+ "n_vecs": 1
+}
