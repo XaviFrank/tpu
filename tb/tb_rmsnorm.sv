@@ -63,11 +63,33 @@ module tb_rmsnorm;
     logic signed [7:0]       out_data;
     logic [AW-1:0]           out_idx;
 
+    //----------------------------------------------------------------
+    // D-CHECK: the new done pulse. Free-running monitors, so every
+    // invocation this testbench makes is covered rather than a
+    // dedicated case. The property that matters is that done is never
+    // EARLY - busy is unusable for chaining (it does not rise until
+    // the cycle after go) and a done landing before the last element
+    // would lose data just as silently.
+    //----------------------------------------------------------------
+    logic dut_done;
+    int dk_go, dk_done, dk_at, dk_after, dk_busy;
+    always @(posedge clk) if (rst_n) begin
+        if (go && !busy) dk_go <= dk_go + 1;
+        if (dut_done) begin
+            dk_done <= dk_done + 1;
+            if (out_valid) dk_at   <= dk_at + 1;
+            if (busy)      dk_busy <= dk_busy + 1;
+        end
+        if (out_valid && !busy && !dut_done) dk_after <= dk_after + 1;
+    end
+    initial begin dk_go = 0; dk_done = 0; dk_at = 0; dk_after = 0; dk_busy = 0; end
+
     rmsnorm #(.N(N), .IN_W(IN_W), .ACC_W(ACC_W)) dut (
         .clk         (clk),
         .rst_n       (rst_n),
         .go          (go),
         .busy        (busy),
+        .done        (dut_done),
         .x_rd_en     (x_rd_en),
         .x_rd_addr   (x_rd_addr),
         .x_rd_data   (x_rd_data),
@@ -419,6 +441,25 @@ module tb_rmsnorm;
                 $display("PASS [E] QK-norm on the SAME module at N=128: %0d/%0d exact, worst |diff| = %0d LSB",
                          exact, N2, worst);
         end
+
+        repeat (4) @(negedge clk);
+
+        // ---- D-CHECK -----------------------------------------------
+        if (dk_done != dk_go) begin
+            errors++;
+            $error("[D] done fired %0d times for %0d go(s)", dk_done, dk_go);
+        end
+        if (dk_after != 0) begin
+            errors++;
+            $error("[D] %0d output beat(s) arrived AFTER done", dk_after);
+        end
+        if (dk_busy != 0) begin
+            errors++;
+            $error("[D] done asserted %0d time(s) while still busy", dk_busy);
+        end
+        if (dk_done == dk_go && dk_after == 0 && dk_busy == 0)
+            $display("PASS [D] %0d done pulses, none early, none while busy",
+                     dk_done);
 
         repeat (2) @(negedge clk);
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");

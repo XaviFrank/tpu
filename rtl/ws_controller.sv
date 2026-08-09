@@ -58,6 +58,7 @@ module ws_controller #(
     input  logic [$clog2(DEPTH)-1:0]      a_base,    // first activation word
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
+    output logic                          done,
 
     // perf Moore flags (in_load is load_mode; tile strobe is w_capture)
     output logic                          in_stream,
@@ -194,6 +195,18 @@ module ws_controller #(
     // Outputs (Moore: pure functions of state + counters)
     //----------------------------------------------------------------
     assign busy       = (state != W_IDLE);
+
+    // Completion pulse. busy alone cannot be chained: it does not RISE
+    // until the cycle after go is sampled, so "assert go; wait !busy"
+    // reads the gap as already-done and falls straight through - the
+    // trap rope.sv and q_scale.sv were both fixed for. This fires in
+    // the cycle the FSM is back in W_IDLE, i.e. after the 2N+1 flush
+    // has drained every column off the bottom edge.
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) done <= 1'b0;
+        else        done <= (state == W_FLUSH)
+                         && (flush_cnt == FLUSH_CYCLES-1);
+    end
     assign in_stream  = (state == W_STREAM);
     assign in_flush   = (state == W_FLUSH);
     assign in_idle    = (state == W_IDLE);

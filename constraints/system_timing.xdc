@@ -159,3 +159,5 @@ set_clock_groups -asynchronous \
 #     still need it unchanged.
 # Until that is done, this file changes nothing about any run.
 #---------------------------------------------------------------------
+
+set_clock_groups -asynchronous -group [get_clocks -quiet -filter {NAME =~ "*core_clk*"}] -group [get_clocks -quiet -filter {NAME =~ "*s_axi_aclk*"}]

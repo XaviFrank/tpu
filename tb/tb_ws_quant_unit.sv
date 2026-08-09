@@ -56,6 +56,52 @@ module tb_ws_quant_unit;
     assign dbg_rd_sel  = 1'b0;
     assign dbg_rd_addr = '0;
 
+    //----------------------------------------------------------------
+    // D-CHECK: the new done pulse, delayed by RQ_PIPE inside the DUT so
+    // it lands on the final q8_valid rather than on the controller's
+    // last sum_valid. Free-running, so every run here is covered.
+    //----------------------------------------------------------------
+    // ANY lane, not lane 0. The array is column-skewed, so column 0
+    // drains FIRST and column N-1 last - a done that fires up to
+    // RQ_PIPE cycles early still lands after lane 0's final beat and
+    // is invisible if only lane 0 is watched. That is not hypothetical:
+    // the first version of this monitor did watch lane 0, and the
+    // control that removes the RQ_PIPE delay passed against it.
+    logic dut_done, any_q8;
+    always_comb begin
+        any_q8 = 1'b0;
+        for (int j = 0; j < N; j++) if (q8_valid[j]) any_q8 = 1'b1;
+    end
+
+    // "after done" must be LATCHED. Counting `!busy && !done` instead
+    // counts every beat in the post-busy drain, including ones that
+    // arrive BEFORE done - which is not the property, and made a
+    // correctly-placed done look broken.
+    // THE GO-CLEAR MUST WIN when go and done land on the same cycle,
+    // and they do: this testbench issues the next go in the very cycle
+    // the previous done fires. With the clear written first, dk_seen
+    // stayed set across the boundary and the NEXT run's beats were all
+    // counted as "after done" - 11 of them, which read as an RTL bug
+    // when the RTL was right. A cycle probe settled it: ctl_done 36,
+    // last q8 beat 37, done 38. Last assignment wins, so the clear
+    // goes last.
+    int  dk_go, dk_done, dk_at, dk_after, dk_busy;
+    logic dk_seen;
+    always @(posedge clk) if (rst_n) begin
+        if (any_q8 && dk_seen && !dut_done) dk_after <= dk_after + 1;
+        if (dut_done) begin
+            dk_done <= dk_done + 1;
+            dk_seen <= 1'b1;
+            if (any_q8) dk_at   <= dk_at + 1;
+            if (busy)   dk_busy <= dk_busy + 1;
+        end
+        if (go && !busy) begin
+            dk_go   <= dk_go + 1;
+            dk_seen <= 1'b0;
+        end
+    end
+    initial begin dk_go = 0; dk_done = 0; dk_at = 0; dk_after = 0; dk_busy = 0; dk_seen = 1'b0; end
+
     ws_quant_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .DEPTH(DEPTH), .VEC_W(VEC_W), .OUT_WIDTH(OUT_WIDTH)
@@ -84,6 +130,7 @@ module tb_ws_quant_unit;
         .sum_valid  (sum_valid),
         .q8_out     (q8_out),
         .q8_valid   (q8_valid),
+        .done       (dut_done),
         .relu_en    (relu_en),
         .scale_mult (scale_mult),
         .shift_amt  (shift_amt)
@@ -252,6 +299,22 @@ module tb_ws_quant_unit;
 
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge clk);
+        // ---- D-CHECK -----------------------------------------------
+        if (dk_done != dk_go) begin
+            errors++;
+            $error("[D] done fired %0d times for %0d go(s)", dk_done, dk_go);
+        end
+        if (dk_after != 0) begin
+            errors++;
+            $error("[D] %0d q8 beat(s) arrived AFTER done", dk_after);
+        end
+        if (dk_busy != 0) begin
+            errors++;
+            $error("[D] done asserted %0d time(s) while still busy", dk_busy);
+        end
+        if (dk_done == dk_go && dk_after == 0 && dk_busy == 0)
+            $display("PASS [D] %0d done pulses, none early, none while busy", dk_done);
+
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
         else             $display("\n=== %0d ERROR(S) ===", errors);
         $finish;

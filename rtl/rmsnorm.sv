@@ -86,6 +86,13 @@ module rmsnorm #(
 
     input  logic go,
     output logic busy,
+    // Completion pulse. busy does not RISE until the cycle after go is
+    // sampled, so "assert go; wait !busy" falls straight through - the
+    // trap rope.sv and q_scale.sv were both fixed for. This fires in
+    // the cycle the FSM is back in S_IDLE, which is two cycles after
+    // the final out_valid (S_P2D drains the read->multiply->requant
+    // pipe), so every element has landed when it pulses.
+    output logic done,
 
     // x buffer read port (rd_data valid 1 cycle after rd_en)
     output logic                    x_rd_en,
@@ -222,6 +229,12 @@ module rmsnorm #(
     end
 
     assign busy      = (state != S_IDLE);
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) done <= 1'b0;
+        else        done <= (state == S_P2D) && (drain == 3'd0);
+    end
+
     assign x_rd_en   = (state == S_SUM) || (state == S_P2);
     assign x_rd_addr = (state == S_P2) ? addr2 : addr;
     assign g_rd_en   = (state == S_P2);

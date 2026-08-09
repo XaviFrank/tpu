@@ -38,6 +38,7 @@ module ws_quant_unit #(
     input  logic [$clog2(DEPTH)-1:0]      a_base,
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
+    output logic                          done,
 
     // perf counter access (pass-through to ws_unit)
     input  logic                          perf_clear,
@@ -72,6 +73,8 @@ module ws_quant_unit #(
     input  logic [SHIFT_WIDTH-1:0]        shift_amt
 );
 
+    logic ctl_done;
+
     ws_unit #(
         .N(N), .K(K), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH),
         .DEPTH(DEPTH), .VEC_W(VEC_W), .DEBUG_CAPTURE(DEBUG_CAPTURE)
@@ -87,6 +90,7 @@ module ws_quant_unit #(
         .a_base     (a_base),
         .n_vecs     (n_vecs),
         .busy       (busy),
+        .done       (ctl_done),
         .perf_clear (perf_clear),
         .perf_addr  (perf_addr),
         .perf_data  (perf_data),
@@ -115,6 +119,27 @@ module ws_quant_unit #(
     // paired with its own valid; a mismatch here would silently
     // misalign every downstream consumer rather than fail loudly.
     //----------------------------------------------------------------
+    //----------------------------------------------------------------
+    // done, delayed to match the requant lanes.
+    //
+    // ws_controller's done fires after the 2N+1 flush, i.e. after the
+    // last sum_valid - but q8_valid is sum_valid delayed by RQ_PIPE,
+    // so at RQ_PIPE=2 the controller's done would land TWO CYCLES
+    // BEFORE the last INT8 result. A consumer that stopped on it would
+    // lose the last two columns, silently. Delaying by exactly RQ_PIPE
+    // puts done on the final q8_valid, which is the convention rope,
+    // q_scale and residual_add all use.
+    //----------------------------------------------------------------
+    logic [1:0] dpipe;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) dpipe <= 2'b00;
+        else        dpipe <= {dpipe[0], ctl_done};
+    end
+
+    assign done = (RQ_PIPE == 2) ? dpipe[1]
+                : (RQ_PIPE == 1) ? dpipe[0] : ctl_done;
+
     logic [1:0] vpipe [N];
 
     for (genvar j = 0; j < N; j++) begin : gen_lane

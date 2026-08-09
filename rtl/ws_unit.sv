@@ -34,6 +34,7 @@ module ws_unit #(
     input  logic [$clog2(DEPTH)-1:0]      a_base,
     input  logic [VEC_W-1:0]              n_vecs,
     output logic                          busy,
+    output logic                          done,
 
     // perf counter access (ws_perf_counters map - see that module)
     input  logic                          perf_clear,
@@ -161,6 +162,7 @@ module ws_unit #(
         .a_base     (a_base),
         .n_vecs     (n_vecs),
         .busy       (busy),
+        .done       (done),
         .in_stream  (in_stream),
         .in_flush   (in_flush),
         .in_idle    (in_idle),
