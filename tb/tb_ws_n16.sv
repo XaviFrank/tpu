@@ -164,6 +164,61 @@ module tb_ws_n16;
     int cad, cad_max;
     int busy_cycles;
 
+    //----------------------------------------------------------------
+    // LATENCY INSTRUMENTATION at the real tile size (N=K=16).
+    //
+    // Probed hierarchically rather than at this TB's own ports,
+    // because the numbers being derived are properties of the ARRAY
+    // and the CONTROLLER, not of ws_quant_unit's boundary: sum_valid
+    // here has already crossed the requant lanes' valid pipe, and
+    // go/busy sit outside the load sequence entirely.
+    //
+    //   u_skew_a.valid_in   what the controller feeds the skew
+    //   u_array.valid_in    the array's own left edge (post-skew)
+    //   u_array.sum_valid   the bottom edge, pre-requant
+    //   u_ctrl.state        W_LOAD duration = the weight-tile load
+    //----------------------------------------------------------------
+    int lat_cyc = 0;
+    int t_skew_in = -1, t_arr_in = -1, t_out0 = -1, t_outN = -1;
+    int load_cycles = 0, load_seen = 0, load_done = 0;
+    int t_wcap = -1, t_load_start = -1;
+    logic any_sv, any_vskew, any_varr;
+
+    always_comb begin
+        any_vskew = 1'b0; any_varr = 1'b0; any_sv = 1'b0;
+        for (int i = 0; i < N; i++) begin
+            if (dut.u_ws.u_skew_a.valid_in[i]) any_vskew = 1'b1;
+            if (dut.u_ws.u_array.valid_in[i])  any_varr  = 1'b1;
+        end
+    end
+
+    always @(posedge clk) begin
+        lat_cyc = lat_cyc + 1;
+        if (rst_n) begin
+            if (t_skew_in < 0 && any_vskew) t_skew_in = lat_cyc;
+            if (t_arr_in  < 0 && any_varr)  t_arr_in  = lat_cyc;
+            if (t_out0 < 0 && dut.u_ws.u_array.sum_valid[0]     === 1'b1)
+                t_out0 = lat_cyc;
+            if (t_outN < 0 && dut.u_ws.u_array.sum_valid[N-1]   === 1'b1)
+                t_outN = lat_cyc;
+            // W_LOAD is state 1 in ws_controller's enum.
+            // ONE episode only: this testbench runs three tiles, so a
+            // plain accumulator returns 3*(N+2) = 54 and reads as a
+            // 3x discrepancy against the derived 18. Stop at the first
+            // exit from W_LOAD.
+            if (dut.u_ws.u_ctrl.state == 2'd1) begin
+                if (load_seen == 0) t_load_start = lat_cyc;
+                if (load_done == 0) begin
+                    load_seen   = 1;
+                    load_cycles = load_cycles + 1;
+                end
+            end else if (load_seen == 1) begin
+                load_done = 1;
+            end
+            if (dut.u_ws.u_ctrl.w_capture && t_wcap < 0) t_wcap = lat_cyc;
+        end
+    end
+
     always @(posedge clk) begin
         if (rst_n) begin
             cad = 0;
@@ -278,6 +333,47 @@ module tb_ws_n16;
 
         //--- summary ---------------------------------------------------
         repeat (2) @(negedge clk);
+        //--- LATENCY at the real tile size -----------------------------
+        // Derived from the RTL before measuring - see tb_ws_array's T4
+        // for the per-PE derivation:
+        //   fill        = N + 1     (array in -> column 0 out)
+        //   end-to-end  = 2N        (array in -> column N-1 out)
+        //   weight load = N + 2     (ws_controller LOAD_CYCLES:
+        //                            N buffer reads + 1 read latency
+        //                            + 1 w_capture)
+        begin : lat16
+            int fill_a, e2e_a;
+            fill_a = t_out0 - t_arr_in;
+            e2e_a  = t_outN - t_arr_in;
+
+            $display("\n--- LATENCY at N=K=%0d (16x16 tile) ---", N);
+            $display("  weight tile load (W_LOAD)          : %0d cycles  (derived N+2 = %0d)",
+                     load_cycles, N + 2);
+            $display("    w_capture fires %0d cycle(s) into W_LOAD",
+                     t_wcap - t_load_start);
+            $display("  skew input -> array input          : %0d",
+                     t_arr_in - t_skew_in);
+            $display("  FILL       array in -> col 0 out   : %0d cycles  (derived N+1 = %0d)",
+                     fill_a, N + 1);
+            $display("  END-TO-END array in -> col %0d out  : %0d cycles  (derived 2N = %0d)",
+                     N - 1, e2e_a, 2 * N);
+
+            if (load_cycles != N + 2) begin
+                errors++;
+                $error("[LAT] W_LOAD %0d cycles, derived %0d", load_cycles, N + 2);
+            end
+            if (fill_a != N + 1) begin
+                errors++;
+                $error("[LAT] fill %0d, derived %0d", fill_a, N + 1);
+            end
+            if (e2e_a != 2 * N) begin
+                errors++;
+                $error("[LAT] end-to-end %0d, derived %0d", e2e_a, 2 * N);
+            end
+            if (load_cycles == N + 2 && fill_a == N + 1 && e2e_a == 2 * N)
+                $display("  PASS [LAT] all three match the RTL-derived formula");
+        end
+
         if (errors == 0) $display("\n=== ALL TESTS PASSED ===");
         else             $display("\n=== %0d ERROR(S) ===", errors);
         $finish;

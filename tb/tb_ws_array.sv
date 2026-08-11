@@ -81,9 +81,32 @@ module tb_ws_array;
     int got_cnt   [4];
     int first_cyc [4];
 
+    //----------------------------------------------------------------
+    // LATENCY INSTRUMENTATION
+    //
+    // Three timestamps, all taken in THIS always block so they share
+    // one cycle convention and the differences are meaningful whatever
+    // the absolute offset is:
+    //
+    //   t_skew_in  first valid at the SKEW's input  (what a TB drives)
+    //   t_arr_in   first valid at the ARRAY's left edge (v_skewed)
+    //   first_cyc[j]  first sum_valid at the bottom of column j
+    //
+    // The two input points differ because input_skew gives row i a
+    // depth of i+1, not i - so even row 0 costs a cycle, and quoting
+    // fill latency from the TB's own drive point overstates the
+    // array's by exactly 1.
+    //----------------------------------------------------------------
+    int t_skew_in = -1;
+    int t_arr_in  = -1;
+
     always @(posedge clk) begin
         cyc = cyc + 1;
         if (rst_n) begin
+            for (int i = 0; i < N; i++) begin
+                if (t_skew_in < 0 && v_bus[i]    === 1'b1) t_skew_in = cyc;
+                if (t_arr_in  < 0 && v_skewed[i] === 1'b1) t_arr_in  = cyc;
+            end
             for (int j = 0; j < N; j++) begin
                 if (sum_valid[j] === 1'b1) begin
                     if (got_cnt[j] == 0) first_cyc[j] = cyc;
@@ -222,6 +245,62 @@ module tb_ws_array;
             end else begin
                 $display("PASS [T3 skew] col %0d lags col 0 by %0d cycle(s)", j, j);
             end
+        end
+
+        //--- T4: LATENCY, measured against the RTL-derived formula -----
+        //
+        // Derived from ws_pe + ws_array + input_skew, taking cycle 0 as
+        // the first valid at the ARRAY's left edge:
+        //
+        //   ws_pe:  valid_pipe <= valid_in          (+1)
+        //           sum_valid  <= valid_pipe        (+1)   -> +2 per PE
+        //           a_out      <= a_in              (+1 per column hop)
+        //   skew:   row i delayed i+1 at the skew, so at the array's
+        //           edge row i leads row 0 by i
+        //
+        // Row N-1's activation reaches column j at (N-1)+j, and that
+        // PE's sum_valid lands 2 cycles later, so the bottom of column
+        // j goes valid at N+j+1. Hence
+        //
+        //   fill (first in -> first out, column 0) = N + 1
+        //   end-to-end (first in -> column N-1 out) = 2N
+        //   and measured from the SKEW's input instead, both +1.
+        //
+        // 2N+1 is also exactly ws_controller's FLUSH_CYCLES, which is
+        // the cross-check that the drain budget was sized from this
+        // same pipeline and not guessed.
+        begin : lat
+            int fill_arr, e2e_arr, fill_skew, e2e_skew, skew_cost;
+            fill_arr  = first_cyc[0]   - t_arr_in;
+            e2e_arr   = first_cyc[N-1] - t_arr_in;
+            fill_skew = first_cyc[0]   - t_skew_in;
+            e2e_skew  = first_cyc[N-1] - t_skew_in;
+            skew_cost = t_arr_in - t_skew_in;
+
+            $display("\n--- T4 latency at N=%0d ---", N);
+            $display("  skew input -> array input : %0d cycle(s)", skew_cost);
+            $display("  FILL      array in -> first out (col 0)   : %0d  (derived N+1 = %0d)",
+                     fill_arr, N + 1);
+            $display("  END-TO-END array in -> last out (col %0d)  : %0d  (derived 2N = %0d)",
+                     N - 1, e2e_arr, 2 * N);
+            $display("  same two measured from the skew input     : %0d and %0d",
+                     fill_skew, e2e_skew);
+
+            if (skew_cost != 1) begin
+                errors++;
+                $error("[T4] skew cost %0d, expected 1 (row 0 depth is i+1 = 1)",
+                       skew_cost);
+            end
+            if (fill_arr != N + 1) begin
+                errors++;
+                $error("[T4] fill %0d, derived %0d", fill_arr, N + 1);
+            end
+            if (e2e_arr != 2 * N) begin
+                errors++;
+                $error("[T4] end-to-end %0d, derived %0d", e2e_arr, 2 * N);
+            end
+            if (skew_cost == 1 && fill_arr == N + 1 && e2e_arr == 2 * N)
+                $display("  PASS [T4] both match the RTL-derived formula exactly");
         end
 
         //--- summary ---------------------------------------------------
