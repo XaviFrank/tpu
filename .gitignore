@@ -13,3 +13,10 @@ software/__pycache__/
 # and would have staged 311 MB.
 software/out/calib28/*.npy
 software/out/calib28/*.npz
+
+# Local AI-assistant tooling and working notes - kept on disk, not published
+CLAUDE.md
+.claude/
+.superpowers/
+skills-lock.json
+docs/superpowers/

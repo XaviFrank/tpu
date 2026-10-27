@@ -2,7 +2,8 @@
 # regress.sh - full TB regression via Icarus. Exit 0 = all green.
 # Self-activating: carries its own toolchain PATH so no shell profile
 # or global Windows PATH entry is required (keeps Vivado's env clean).
-export PATH="/c/dev/oss-cad-suite/bin:/c/dev/oss-cad-suite/lib:$PATH"
+OSS_CAD_SUITE="${OSS_CAD_SUITE:-/c/dev/oss-cad-suite}"
+export PATH="$OSS_CAD_SUITE/bin:$OSS_CAD_SUITE/lib:$PATH"
 
 set -u
 FLAGS="-g2012"
